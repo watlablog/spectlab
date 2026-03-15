@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <title>SpectLab</title>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <section id="login-page" class="login-page panel">
+        <h1 class="login-title">SpectLab</h1>
+        <button id="login-button" class="btn btn-primary login-button" type="button">Googleでログイン</button>
+      </section>
+
+      <section id="app-page" class="app-page" hidden>
+        <section class="panel control-panel">
+          <div>
+            <p class="panel-title">マイク解析</p>
+            <p id="mic-status" class="status">開始ボタンを押すとマイク許可を要求します。</p>
+          </div>
+          <div class="button-row">
+            <button id="start-button" class="btn btn-accent" type="button">マイク開始</button>
+            <button id="stop-button" class="btn" type="button">停止</button>
+          </div>
+        </section>
+
+        <section class="panel canvas-panel">
+          <div class="y-axis-area">
+            <label class="freq-input-row freq-input-row-max" for="freq-max-input">
+              <span>Max</span>
+              <input id="freq-max-input" type="number" step="1" inputmode="numeric" />
+            </label>
+            <div class="chart-layout">
+              <div class="y-range-row">
+                <div id="freq-slider" class="freq-slider" aria-label="周波数レンジスライダ">
+                  <div class="freq-slider-track"></div>
+                  <div id="freq-slider-selection" class="freq-slider-selection"></div>
+                  <button
+                    id="freq-handle-max"
+                    class="freq-handle"
+                    type="button"
+                    aria-label="周波数上限ハンドル"
+                  ></button>
+                  <button
+                    id="freq-handle-min"
+                    class="freq-handle"
+                    type="button"
+                    aria-label="周波数下限ハンドル"
+                  ></button>
+                </div>
+                <div class="y-axis-legend">
+                  <p class="axis-caption axis-caption-y">Frequency [Hz]</p>
+                  <div id="y-ticks" class="y-ticks"></div>
+                </div>
+              </div>
+              <div class="plot-area">
+                <canvas id="spectrogram-canvas" width="960" height="420" aria-label="スペクトログラム"></canvas>
+                <div id="x-ticks" class="x-ticks"></div>
+                <p class="axis-caption axis-caption-x">Time [s]</p>
+              </div>
+            </div>
+            <label class="freq-input-row freq-input-row-min" for="freq-min-input">
+              <span>Min</span>
+              <input id="freq-min-input" type="number" step="1" inputmode="numeric" />
+            </label>
+          </div>
+        </section>
+
+        <div class="panel account-dock">
+          <p id="user-name" class="user-name">-</p>
+          <button id="logout-button" class="btn" type="button">ログアウト</button>
+        </div>
+      </section>
+
+      <p id="error-message" class="error" role="alert" hidden></p>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
