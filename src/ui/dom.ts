@@ -8,20 +8,34 @@ export interface UIElements {
   startButton: HTMLButtonElement
   stopButton: HTMLButtonElement
   errorMessage: HTMLParagraphElement
+  frameSizeSelect: HTMLSelectElement
+  overlapInput: HTMLInputElement
+  upperFrequencySelect: HTMLSelectElement
   freqMinInput: HTMLInputElement
   freqMaxInput: HTMLInputElement
   freqSlider: HTMLDivElement
   freqSliderSelection: HTMLDivElement
   freqHandleMin: HTMLButtonElement
   freqHandleMax: HTMLButtonElement
-  xTicks: HTMLDivElement
-  yTicks: HTMLDivElement
+  dbSlider: HTMLDivElement
+  dbSliderSelection: HTMLDivElement
+  dbHandleMin: HTMLButtonElement
+  dbHandleMax: HTMLButtonElement
+  dbMaxInput: HTMLInputElement
+  dbMinInput: HTMLInputElement
+  timeSlider: HTMLDivElement
+  timeSliderSelection: HTMLDivElement
+  timeHandleMin: HTMLButtonElement
+  timeHandleMax: HTMLButtonElement
+  timeMinInput: HTMLInputElement
+  timeMaxInput: HTMLInputElement
+  dbTicks: HTMLDivElement
   canvas: HTMLCanvasElement
 }
 
 function getRequiredElement<T extends HTMLElement>(
   id: string,
-  typeName: 'canvas' | 'button' | 'paragraph' | 'section' | 'div' | 'input',
+  typeName: 'canvas' | 'button' | 'paragraph' | 'section' | 'div' | 'input' | 'select',
 ): T {
   const element = document.getElementById(id)
 
@@ -53,6 +67,10 @@ function getRequiredElement<T extends HTMLElement>(
     throw new Error(`Element #${id} is not an input.`)
   }
 
+  if (typeName === 'select' && !(element instanceof HTMLSelectElement)) {
+    throw new Error(`Element #${id} is not a select.`)
+  }
+
   return element as T
 }
 
@@ -67,14 +85,28 @@ export function getUIElements(): UIElements {
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),
     stopButton: getRequiredElement<HTMLButtonElement>('stop-button', 'button'),
     errorMessage: getRequiredElement<HTMLParagraphElement>('error-message', 'paragraph'),
+    frameSizeSelect: getRequiredElement<HTMLSelectElement>('frame-size-select', 'select'),
+    overlapInput: getRequiredElement<HTMLInputElement>('overlap-input', 'input'),
+    upperFrequencySelect: getRequiredElement<HTMLSelectElement>('upper-frequency-select', 'select'),
     freqMinInput: getRequiredElement<HTMLInputElement>('freq-min-input', 'input'),
     freqMaxInput: getRequiredElement<HTMLInputElement>('freq-max-input', 'input'),
     freqSlider: getRequiredElement<HTMLDivElement>('freq-slider', 'div'),
     freqSliderSelection: getRequiredElement<HTMLDivElement>('freq-slider-selection', 'div'),
     freqHandleMin: getRequiredElement<HTMLButtonElement>('freq-handle-min', 'button'),
     freqHandleMax: getRequiredElement<HTMLButtonElement>('freq-handle-max', 'button'),
-    xTicks: getRequiredElement<HTMLDivElement>('x-ticks', 'div'),
-    yTicks: getRequiredElement<HTMLDivElement>('y-ticks', 'div'),
+    dbSlider: getRequiredElement<HTMLDivElement>('db-slider', 'div'),
+    dbSliderSelection: getRequiredElement<HTMLDivElement>('db-slider-selection', 'div'),
+    dbHandleMin: getRequiredElement<HTMLButtonElement>('db-handle-min', 'button'),
+    dbHandleMax: getRequiredElement<HTMLButtonElement>('db-handle-max', 'button'),
+    dbMaxInput: getRequiredElement<HTMLInputElement>('db-max-input', 'input'),
+    dbMinInput: getRequiredElement<HTMLInputElement>('db-min-input', 'input'),
+    timeSlider: getRequiredElement<HTMLDivElement>('time-slider', 'div'),
+    timeSliderSelection: getRequiredElement<HTMLDivElement>('time-slider-selection', 'div'),
+    timeHandleMin: getRequiredElement<HTMLButtonElement>('time-handle-min', 'button'),
+    timeHandleMax: getRequiredElement<HTMLButtonElement>('time-handle-max', 'button'),
+    timeMinInput: getRequiredElement<HTMLInputElement>('time-min-input', 'input'),
+    timeMaxInput: getRequiredElement<HTMLInputElement>('time-max-input', 'input'),
+    dbTicks: getRequiredElement<HTMLDivElement>('db-ticks', 'div'),
     canvas: getRequiredElement<HTMLCanvasElement>('spectrogram-canvas', 'canvas'),
   }
 }

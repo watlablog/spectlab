@@ -15,9 +15,33 @@
 
       <section id="app-page" class="app-page" hidden>
         <section class="panel control-panel">
-          <div>
+          <div class="control-info">
             <p class="panel-title">マイク解析</p>
             <p id="mic-status" class="status">開始ボタンを押すとマイク許可を要求します。</p>
+            <div class="analysis-settings">
+              <label class="analysis-field" for="frame-size-select">
+                <span>Frame size</span>
+                <select id="frame-size-select">
+                  <option value="512">512</option>
+                  <option value="1024">1024</option>
+                  <option value="2048">2048</option>
+                  <option value="4096">4096</option>
+                  <option value="8192">8192</option>
+                </select>
+              </label>
+              <label class="analysis-field" for="overlap-input">
+                <span>Overlap [%]</span>
+                <input id="overlap-input" type="number" min="0" max="99" step="1" inputmode="numeric" />
+              </label>
+              <label class="analysis-field" for="upper-frequency-select">
+                <span>Upper [Hz]</span>
+                <select id="upper-frequency-select">
+                  <option value="5000">5000</option>
+                  <option value="10000">10000</option>
+                  <option value="20000">20000</option>
+                </select>
+              </label>
+            </div>
           </div>
           <div class="button-row">
             <button id="start-button" class="btn btn-accent" type="button">マイク開始</button>
@@ -27,12 +51,8 @@
 
         <section class="panel canvas-panel">
           <div class="y-axis-area">
-            <label class="freq-input-row freq-input-row-max" for="freq-max-input">
-              <span>Max</span>
-              <input id="freq-max-input" type="number" step="1" inputmode="numeric" />
-            </label>
             <div class="chart-layout">
-              <div class="y-range-row">
+              <div id="freq-slider-column" class="y-range-row">
                 <div id="freq-slider" class="freq-slider" aria-label="周波数レンジスライダ">
                   <div class="freq-slider-track"></div>
                   <div id="freq-slider-selection" class="freq-slider-selection"></div>
@@ -49,21 +69,82 @@
                     aria-label="周波数下限ハンドル"
                   ></button>
                 </div>
-                <div class="y-axis-legend">
-                  <p class="axis-caption axis-caption-y">Frequency [Hz]</p>
-                  <div id="y-ticks" class="y-ticks"></div>
-                </div>
               </div>
               <div class="plot-area">
-                <canvas id="spectrogram-canvas" width="960" height="420" aria-label="スペクトログラム"></canvas>
-                <div id="x-ticks" class="x-ticks"></div>
-                <p class="axis-caption axis-caption-x">Time [s]</p>
+                <div class="plot-main">
+                  <canvas id="spectrogram-canvas" width="960" height="420" aria-label="スペクトログラム"></canvas>
+                  <div class="time-slider-wrap">
+                    <div id="time-slider" class="time-slider" aria-label="時間レンジスライダ">
+                      <div class="time-slider-track"></div>
+                      <div id="time-slider-selection" class="time-slider-selection"></div>
+                      <button
+                        id="time-handle-min"
+                        class="time-handle"
+                        type="button"
+                        aria-label="時間下限ハンドル"
+                      ></button>
+                      <button
+                        id="time-handle-max"
+                        class="time-handle"
+                        type="button"
+                        aria-label="時間上限ハンドル"
+                      ></button>
+                    </div>
+                  </div>
+                </div>
+                <div class="db-scale-area">
+                  <div class="db-scale-row">
+                    <div id="db-slider" class="db-slider" aria-label="振幅レンジスライダ">
+                      <div class="db-slider-track"></div>
+                      <div id="db-slider-selection" class="db-slider-selection"></div>
+                      <button
+                        id="db-handle-max"
+                        class="db-handle"
+                        type="button"
+                        aria-label="振幅上限ハンドル"
+                      ></button>
+                      <button
+                        id="db-handle-min"
+                        class="db-handle"
+                        type="button"
+                        aria-label="振幅下限ハンドル"
+                      ></button>
+                    </div>
+                    <div id="db-colorbar" class="db-colorbar" aria-hidden="true"></div>
+                    <div class="db-legend">
+                      <p class="axis-caption axis-caption-db">Level [dB]</p>
+                      <div id="db-ticks" class="db-ticks"></div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
-            <label class="freq-input-row freq-input-row-min" for="freq-min-input">
-              <span>Min</span>
-              <input id="freq-min-input" type="number" step="1" inputmode="numeric" />
-            </label>
+            <div class="range-controls">
+              <label class="range-field" for="freq-min-input">
+                <span>Freq.Min</span>
+                <input id="freq-min-input" type="number" step="1" inputmode="numeric" />
+              </label>
+              <label class="range-field" for="freq-max-input">
+                <span>Freq.Max</span>
+                <input id="freq-max-input" type="number" step="1" inputmode="numeric" />
+              </label>
+              <label class="range-field" for="db-min-input">
+                <span>Amp.Min</span>
+                <input id="db-min-input" type="number" step="1" inputmode="numeric" />
+              </label>
+              <label class="range-field" for="db-max-input">
+                <span>Amp.Max</span>
+                <input id="db-max-input" type="number" step="1" inputmode="numeric" />
+              </label>
+              <label class="range-field" for="time-min-input">
+                <span>Time.Min</span>
+                <input id="time-min-input" type="number" step="0.1" inputmode="decimal" />
+              </label>
+              <label class="range-field" for="time-max-input">
+                <span>Time.Max</span>
+                <input id="time-max-input" type="number" step="0.1" inputmode="decimal" />
+              </label>
+            </div>
           </div>
         </section>
 

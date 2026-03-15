@@ -84,6 +84,12 @@ body {
   padding: 1rem 1.15rem;
 }
 
+.control-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
 .panel-title {
   margin: 0;
   font-weight: 650;
@@ -99,6 +105,47 @@ body {
   display: flex;
   gap: 0.65rem;
   flex-wrap: wrap;
+}
+
+.analysis-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.analysis-field {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.analysis-field span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.analysis-field select,
+.analysis-field input {
+  min-width: 96px;
+  border: 1px solid rgba(141, 189, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(8, 24, 42, 0.72);
+  color: #f6f8ff;
+  font-size: 0.8rem;
+  padding: 0.28rem 0.45rem;
+}
+
+.analysis-field select:focus-visible,
+.analysis-field input:focus-visible {
+  outline: 2px solid rgba(92, 151, 255, 0.7);
+  outline-offset: 1px;
+}
+
+.analysis-field select:disabled,
+.analysis-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn {
@@ -153,66 +200,29 @@ body {
 
 .y-axis-area {
   display: grid;
-  grid-template-rows: auto auto auto;
+  grid-template-rows: auto auto;
   align-items: start;
-  gap: 0.55rem;
-}
-
-.freq-input-row {
-  display: grid;
-  grid-template-columns: 34px 1fr;
-  align-items: center;
-  gap: 0.35rem;
-  width: 232px;
-}
-
-.freq-input-row-max {
-  align-self: start;
-}
-
-.freq-input-row-min {
-  align-self: end;
-}
-
-.freq-input-row span {
-  color: var(--text-muted);
-  font-size: 0.75rem;
-  text-align: right;
-}
-
-.freq-input-row input {
-  width: 100%;
-  border: 1px solid rgba(141, 189, 255, 0.25);
-  border-radius: 8px;
-  background: rgba(8, 24, 42, 0.72);
-  color: #f6f8ff;
-  font-size: 0.78rem;
-  padding: 0.28rem 0.4rem;
-}
-
-.freq-input-row input:focus-visible {
-  outline: 2px solid rgba(92, 151, 255, 0.7);
-  outline-offset: 1px;
+  gap: 0.7rem;
 }
 
 .y-range-row {
-  display: grid;
-  grid-template-columns: var(--freq-slider-width) 1fr;
-  align-items: stretch;
-  column-gap: 0.5rem;
-  height: var(--plot-height);
+  width: var(--freq-slider-width);
+  align-self: stretch;
 }
 
 .chart-layout {
   display: grid;
-  grid-template-columns: 232px 1fr;
+  grid-template-columns: var(--freq-slider-width) 1fr;
   align-items: start;
   gap: 0.8rem;
 }
 
 .freq-slider {
+  --slider-offset: 0px;
+  --slider-height: var(--plot-height);
   position: relative;
-  height: var(--plot-height);
+  margin-top: var(--slider-offset);
+  height: var(--slider-height);
   width: var(--freq-slider-width);
   touch-action: none;
 }
@@ -256,10 +266,9 @@ body {
   outline-offset: 1px;
 }
 
-.y-axis-legend {
-  position: relative;
-  height: var(--plot-height);
-  padding-left: 1.5rem;
+.freq-handle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .axis-caption {
@@ -268,49 +277,15 @@ body {
   font-size: 0.85rem;
 }
 
-.axis-caption-y {
-  position: absolute;
-  top: 50%;
-  left: 0.35rem;
-  transform: translate(-50%, -50%) rotate(-90deg);
-  transform-origin: center;
-  text-align: center;
-  white-space: nowrap;
-}
-
-.axis-caption-x {
-  text-align: right;
-}
-
-.y-ticks {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-
-.y-tick {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.y-tick::after {
-  content: '';
-  flex: 1;
-  border-top: 1px solid rgba(167, 205, 255, 0.2);
-}
-
-.y-tick-label {
-  min-width: 3.7rem;
-  text-align: right;
-  font-size: 0.76rem;
-  color: var(--text-muted);
-}
-
 .plot-area {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 122px;
+  align-items: start;
+  column-gap: 0.75rem;
+}
+
+.plot-main {
+  display: block;
 }
 
 #spectrogram-canvas {
@@ -321,42 +296,207 @@ body {
   background: #02070f;
 }
 
-.x-ticks {
-  position: relative;
-  height: 1.9rem;
+.time-slider-wrap {
   margin-top: 0.45rem;
 }
 
-.x-tick {
+.time-slider {
+  position: relative;
+  width: 100%;
+  height: 22px;
+  touch-action: none;
+}
+
+.time-slider-track {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: rgba(132, 170, 230, 0.28);
+}
+
+.time-slider-selection {
+  position: absolute;
+  top: 50%;
+  height: 8px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: rgba(120, 197, 255, 0.78);
+}
+
+.time-handle {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 20px;
+  border: 1px solid rgba(201, 226, 255, 0.92);
+  border-radius: 999px;
+  background: #c8dcff;
+  transform: translate(-50%, -50%);
+  cursor: ew-resize;
+  padding: 0;
+  touch-action: none;
+}
+
+.time-handle:focus-visible {
+  outline: 2px solid rgba(92, 151, 255, 0.72);
+  outline-offset: 1px;
+}
+
+.time-handle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.db-scale-area {
+  display: block;
+}
+
+.db-scale-row {
+  display: grid;
+  grid-template-columns: 24px 14px 1fr;
+  align-items: stretch;
+  column-gap: 0.42rem;
+  height: var(--plot-height);
+}
+
+.db-slider {
+  position: relative;
+  height: 100%;
+  width: 24px;
+  touch-action: none;
+}
+
+.db-slider-track {
   position: absolute;
   top: 0;
+  left: 50%;
+  width: 4px;
+  height: 100%;
+  border-radius: 999px;
   transform: translateX(-50%);
+  background: rgba(132, 170, 230, 0.28);
+}
+
+.db-slider-selection {
+  position: absolute;
+  left: 50%;
+  width: 8px;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  background: rgba(255, 168, 76, 0.78);
+}
+
+.db-handle {
+  position: absolute;
+  left: 50%;
+  width: 20px;
+  height: 12px;
+  border: 1px solid rgba(255, 228, 187, 0.95);
+  border-radius: 999px;
+  background: #ffd7a6;
+  transform: translate(-50%, -50%);
+  cursor: ns-resize;
+  padding: 0;
+  touch-action: none;
+}
+
+.db-handle:focus-visible {
+  outline: 2px solid rgba(255, 191, 99, 0.72);
+  outline-offset: 1px;
+}
+
+.db-handle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.db-colorbar {
+  border-radius: 999px;
+  border: 1px solid rgba(141, 189, 255, 0.28);
+  background: linear-gradient(
+    to bottom,
+    rgb(255 96 28) 0%,
+    rgb(72 212 130) 34%,
+    rgb(32 101 255) 67%,
+    rgb(2 8 22) 100%
+  );
+}
+
+.db-legend {
+  position: relative;
+  height: var(--plot-height);
+}
+
+.axis-caption-db {
+  text-align: left;
+  margin-bottom: 0.25rem;
+}
+
+.db-ticks {
+  height: calc(var(--plot-height) - 1.2rem);
   display: flex;
   flex-direction: column;
+  justify-content: space-between;
+}
+
+.db-tick {
+  display: flex;
   align-items: center;
-  gap: 0.16rem;
+  gap: 0.35rem;
 }
 
-.x-tick.is-edge-start {
-  transform: none;
-  align-items: flex-start;
+.db-tick::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid rgba(167, 205, 255, 0.2);
 }
 
-.x-tick.is-edge-end {
-  transform: translateX(-100%);
-  align-items: flex-end;
-}
-
-.x-tick-mark {
-  width: 1px;
-  height: 8px;
-  background: rgba(167, 205, 255, 0.5);
-}
-
-.x-tick-label {
-  font-size: 0.76rem;
+.db-tick-label {
+  min-width: 2rem;
+  text-align: right;
+  font-size: 0.7rem;
   color: var(--text-muted);
-  white-space: nowrap;
+}
+
+.range-controls {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.range-field {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 0.28rem;
+}
+
+.range-field span {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.range-field input {
+  width: 100%;
+  border: 1px solid rgba(141, 189, 255, 0.25);
+  border-radius: 8px;
+  background: rgba(8, 24, 42, 0.72);
+  color: #f6f8ff;
+  font-size: 0.76rem;
+  padding: 0.25rem 0.35rem;
+}
+
+.range-field input:focus-visible {
+  outline: 2px solid rgba(92, 151, 255, 0.7);
+  outline-offset: 1px;
+}
+
+.range-field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .account-dock {
@@ -378,16 +518,8 @@ body {
 }
 
 @media (max-width: 960px) {
-  .freq-input-row {
-    width: 205px;
-  }
-
-  .chart-layout {
-    grid-template-columns: 205px 1fr;
-  }
-
-  .y-tick-label {
-    min-width: 3.2rem;
+  .range-controls {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
@@ -409,22 +541,17 @@ body {
     flex: 1;
   }
 
-  .chart-layout {
-    grid-template-columns: 1fr;
-    gap: 0.75rem;
+  .plot-area {
+    grid-template-columns: 1fr 112px;
   }
 
-  .freq-input-row {
-    width: 100%;
+  .range-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
   }
 
-  .y-range-row {
-    grid-template-columns: var(--freq-slider-width) 1fr;
-  }
-
-  .y-tick-label {
-    min-width: 2.8rem;
-    font-size: 0.72rem;
+  .range-field span {
+    font-size: 0.68rem;
   }
 
   .account-dock {

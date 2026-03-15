@@ -5,6 +5,9 @@ export function renderControlsView(elements: UIElements, state: AppState): void 
   const isSignedIn = state.authStatus === 'signed-in'
   elements.startButton.disabled = !isSignedIn || state.isRecording
   elements.stopButton.disabled = !isSignedIn || !state.isRecording
+  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording
+  elements.overlapInput.disabled = !isSignedIn || state.isRecording
+  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording
 
   if (!isSignedIn) {
     elements.micStatus.textContent = 'ログイン後に利用できます。'

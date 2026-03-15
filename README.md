@@ -1,6 +1,6 @@
 # SpectLab
 
-Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequencyの目盛り付きで、横軸は10秒固定です。
+Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `20000`）。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。
 
 ## 1. Setup
 
@@ -35,6 +35,9 @@ firebase deploy --only hosting
 - 許可後にスペクトログラムが連続更新される
 - 停止で更新が止まり、再開できる
 - 権限拒否時にエラーが表示される
+- 録音中は `Frame size` と `Overlap [%]` と `Upper [Hz]` が無効化（グレーアウト）される
+- `Overlap [%]` は Enter で確定し、`0-99` 範囲外や非数値は復帰する
+- dBカラーバーに目盛りが表示され、`Max/Min` のEnter確定で色レンジが更新される
 
 ### Auth
 - Googleログイン成功後にユーザー表示が切り替わる

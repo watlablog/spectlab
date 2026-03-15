@@ -1,12 +1,19 @@
+import type { FrameSize, UpperFrequencyHz } from '../app/types'
+
+const UPPER_FREQUENCY_WORKLET_URL = new URL('./worklets/upperFrequencyProcessor.js', import.meta.url)
+
 export interface AnalyserPipeline {
   audioContext: AudioContext
   analyser: AnalyserNode
   sourceNode: MediaStreamAudioSourceNode
-  frequencyData: Float32Array<ArrayBuffer>
+  timeDomainData: Float32Array<ArrayBuffer>
   disconnect: () => void
 }
 
-export async function createAnalyserPipeline(stream: MediaStream): Promise<AnalyserPipeline> {
+export async function createAnalyserPipeline(
+  stream: MediaStream,
+  options: { fftSize: FrameSize; upperFrequencyHz: UpperFrequencyHz },
+): Promise<AnalyserPipeline> {
   const audioContext = new AudioContext()
   if (audioContext.state === 'suspended') {
     await audioContext.resume()
@@ -15,20 +22,38 @@ export async function createAnalyserPipeline(stream: MediaStream): Promise<Analy
   const sourceNode = audioContext.createMediaStreamSource(stream)
   const analyser = audioContext.createAnalyser()
 
-  analyser.fftSize = 2048
+  analyser.fftSize = options.fftSize
   analyser.smoothingTimeConstant = 0.8
-  analyser.minDecibels = -90
-  analyser.maxDecibels = -10
 
-  sourceNode.connect(analyser)
+  let filterNode: AudioWorkletNode | null = null
+  try {
+    await audioContext.audioWorklet.addModule(UPPER_FREQUENCY_WORKLET_URL.href)
+    filterNode = new AudioWorkletNode(audioContext, 'upper-frequency-processor')
+    const cutoffParam = filterNode.parameters.get('cutoffHz')
+    if (cutoffParam) {
+      cutoffParam.value = options.upperFrequencyHz
+    }
+  } catch (error) {
+    console.warn('AudioWorklet initialization failed. Falling back without upper-frequency filtering.', error)
+  }
+
+  if (filterNode) {
+    sourceNode.connect(filterNode)
+    filterNode.connect(analyser)
+  } else {
+    sourceNode.connect(analyser)
+  }
 
   return {
     audioContext,
     analyser,
     sourceNode,
-    frequencyData: new Float32Array(analyser.frequencyBinCount),
+    timeDomainData: new Float32Array(analyser.fftSize),
     disconnect: () => {
       sourceNode.disconnect()
+      if (filterNode) {
+        filterNode.disconnect()
+      }
       analyser.disconnect()
     },
   }
