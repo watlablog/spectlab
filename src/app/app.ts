@@ -408,6 +408,8 @@ export function bootstrapApp(): void {
   let lastStableColumnData: Float32Array | null = null
   let silenceColumnData: Float32Array | null = null
   let stftTransformer: StftTransformer | null = null
+  let playbackContext: AudioContext | null = null
+  let playbackSourceNode: AudioBufferSourceNode | null = null
   const axisConfig: AxisRenderConfig = {
     timeWindowSec: SPECTROGRAM_WINDOW_SECONDS,
     timeLabelOffsetSec: 0,
@@ -540,6 +542,30 @@ export function bootstrapApp(): void {
     }
   }
 
+  const resolveTimeWindowIndices = (
+    timeMinSec: number,
+    timeMaxSec: number,
+    timeDomainMinSec: number,
+    timeDomainMaxSec: number,
+    timelineColumns: number,
+  ): { startIndex: number; endIndexExclusive: number } => {
+    const safeTimelineColumns = Math.max(1, timelineColumns)
+    const fullSpanSec = Math.max(MIN_TIME_GAP_SEC, timeDomainMaxSec - timeDomainMinSec)
+    const safeMinSec = clamp(timeMinSec, timeDomainMinSec, timeDomainMaxSec - MIN_TIME_GAP_SEC)
+    const safeMaxSec = clamp(timeMaxSec, safeMinSec + MIN_TIME_GAP_SEC, timeDomainMaxSec)
+    const startRatio = (safeMinSec - timeDomainMinSec) / fullSpanSec
+    const endRatio = (safeMaxSec - timeDomainMinSec) / fullSpanSec
+
+    return {
+      startIndex: clamp(Math.floor(startRatio * safeTimelineColumns), 0, Math.max(safeTimelineColumns - 1, 0)),
+      endIndexExclusive: clamp(
+        Math.ceil(endRatio * safeTimelineColumns),
+        clamp(Math.floor(startRatio * safeTimelineColumns), 0, Math.max(safeTimelineColumns - 1, 0)) + 1,
+        safeTimelineColumns,
+      ),
+    }
+  }
+
   const sampleHistoryByTimeWindow = (
     rangeMinHz: number,
     rangeMaxHz: number,
@@ -556,13 +582,13 @@ export function bootstrapApp(): void {
       return { history: new Float32Array(0), count: 0, bins: 0 }
     }
 
-    const fullSpanSec = Math.max(MIN_TIME_GAP_SEC, timeDomainMaxSec - timeDomainMinSec)
-    const safeMinSec = clamp(timeMinSec, timeDomainMinSec, timeDomainMaxSec - MIN_TIME_GAP_SEC)
-    const safeMaxSec = clamp(timeMaxSec, safeMinSec + MIN_TIME_GAP_SEC, timeDomainMaxSec)
-    const startRatio = (safeMinSec - timeDomainMinSec) / fullSpanSec
-    const endRatio = (safeMaxSec - timeDomainMinSec) / fullSpanSec
-    const startIndex = clamp(Math.floor(startRatio * timelineColumns), 0, Math.max(timelineColumns - 1, 0))
-    const endIndexExclusive = clamp(Math.ceil(endRatio * timelineColumns), startIndex + 1, timelineColumns)
+    const { startIndex, endIndexExclusive } = resolveTimeWindowIndices(
+      timeMinSec,
+      timeMaxSec,
+      timeDomainMinSec,
+      timeDomainMaxSec,
+      timelineColumns,
+    )
     const selectedCount = Math.max(1, endIndexExclusive - startIndex)
 
     ensureLinearHistoryBuffer(selectedCount, bins)
@@ -832,10 +858,11 @@ export function bootstrapApp(): void {
 
   const renderTimeControls = (state: AppState): void => {
     const isSignedIn = state.authStatus === 'signed-in'
-    elements.timeMinInput.disabled = !isSignedIn
-    elements.timeMaxInput.disabled = !isSignedIn
-    elements.timeHandleMin.disabled = !isSignedIn
-    elements.timeHandleMax.disabled = !isSignedIn
+    const lockTimeRange = !isSignedIn || state.isPlayingBack
+    elements.timeMinInput.disabled = lockTimeRange
+    elements.timeMaxInput.disabled = lockTimeRange
+    elements.timeHandleMin.disabled = lockTimeRange
+    elements.timeHandleMax.disabled = lockTimeRange
 
     elements.timeMinInput.min = String(state.timeDomainMinSec)
     elements.timeMinInput.max = String(state.timeMaxSec - MIN_TIME_GAP_SEC)
@@ -1194,6 +1221,93 @@ export function bootstrapApp(): void {
   applyRendererLayout()
   updateAxisConfig(stateStore.getState())
 
+  const stopPlayback = async (): Promise<void> => {
+    const activeSource = playbackSourceNode
+    const activeContext = playbackContext
+    playbackSourceNode = null
+    playbackContext = null
+
+    if (activeSource) {
+      activeSource.onended = null
+      try {
+        activeSource.stop()
+      } catch {
+        // Ignore InvalidStateError if the source already ended.
+      }
+      activeSource.disconnect()
+    }
+
+    if (activeContext) {
+      await activeContext.close().catch(() => undefined)
+    }
+
+    if (stateStore.getState().isPlayingBack) {
+      stateStore.setState({ isPlayingBack: false })
+    }
+  }
+
+  const startPlayback = async (): Promise<void> => {
+    const state = stateStore.getState()
+    if (state.isRecording || state.isPlayingBack) {
+      return
+    }
+
+    const timelineColumns = Math.max(1, frequencyHistoryRing.capacity || getHistoryCapacity())
+    const windowIndices = resolveTimeWindowIndices(
+      state.timeMinSec,
+      state.timeMaxSec,
+      state.timeDomainMinSec,
+      state.timeDomainMaxSec,
+      timelineColumns,
+    )
+    const windowSec = Math.max(MIN_TIME_GAP_SEC, state.timeDomainMaxSec - state.timeDomainMinSec)
+    const snappedStartSec =
+      ((windowIndices.startIndex / timelineColumns) * windowSec) + state.timeDomainMinSec
+    const snappedEndSec =
+      ((windowIndices.endIndexExclusive / timelineColumns) * windowSec) + state.timeDomainMinSec
+
+    const playbackRange = audioEngine.getRecordedPcmRange(
+      snappedStartSec - state.timeDomainMinSec,
+      snappedEndSec - state.timeDomainMinSec,
+      windowSec,
+    )
+    if (!playbackRange || playbackRange.samples.length <= 0) {
+      stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
+      return
+    }
+
+    await stopPlayback()
+
+    const context = new AudioContext()
+    if (context.state === 'suspended') {
+      await context.resume()
+    }
+
+    const playbackSamples = new Float32Array(playbackRange.samples)
+    const buffer = context.createBuffer(1, playbackSamples.length, playbackRange.sampleRateHz)
+    buffer.copyToChannel(playbackSamples, 0)
+
+    const sourceNode = context.createBufferSource()
+    sourceNode.buffer = buffer
+    sourceNode.connect(context.destination)
+
+    playbackContext = context
+    playbackSourceNode = sourceNode
+    sourceNode.onended = () => {
+      if (playbackSourceNode !== sourceNode) {
+        return
+      }
+      void stopPlayback()
+    }
+
+    stateStore.setState({
+      isPlayingBack: true,
+      errorMessage: null,
+    })
+
+    sourceNode.start()
+  }
+
   const stopVisualization = async (): Promise<void> => {
     if (frameId !== null) {
       cancelAnimationFrame(frameId)
@@ -1460,7 +1574,10 @@ export function bootstrapApp(): void {
       })
 
       if (!user) {
-        void stopVisualization()
+        void (async () => {
+          await stopVisualization()
+          await stopPlayback()
+        })()
       }
     })
   }
@@ -1697,7 +1814,7 @@ export function bootstrapApp(): void {
 
   const beginTimeSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
+    if (state.authStatus !== 'signed-in' || state.isPlayingBack) {
       return
     }
 
@@ -1735,6 +1852,9 @@ export function bootstrapApp(): void {
     }
 
     const state = stateStore.getState()
+    if (state.isPlayingBack) {
+      return
+    }
     const rect = elements.timeSlider.getBoundingClientRect()
     if (rect.width <= 0) {
       return
@@ -1771,6 +1891,7 @@ export function bootstrapApp(): void {
     }
 
     try {
+      await stopPlayback()
       await audioEngine.start({
         fftSize: state.analysisFrameSize,
         upperFrequencyHz: state.analysisUpperFrequencyHz,
@@ -1809,8 +1930,33 @@ export function bootstrapApp(): void {
     }
   })
 
+  elements.playButton.addEventListener('click', async () => {
+    stateStore.setState({ errorMessage: null })
+
+    const state = stateStore.getState()
+    if (state.authStatus !== 'signed-in') {
+      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+      return
+    }
+
+    try {
+      await startPlayback()
+    } catch (error) {
+      await stopPlayback()
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, '音声再生に失敗しました。'),
+      })
+    }
+  })
+
   elements.stopButton.addEventListener('click', async () => {
-    await stopVisualization()
+    const state = stateStore.getState()
+    if (state.isRecording) {
+      await stopVisualization()
+    }
+    if (state.isPlayingBack) {
+      await stopPlayback()
+    }
   })
 
   elements.loginButton.addEventListener('click', async () => {
@@ -1835,6 +1981,7 @@ export function bootstrapApp(): void {
 
     try {
       await stopVisualization()
+      await stopPlayback()
       await authService.signOut()
     } catch (error) {
       stateStore.setState({
@@ -1861,6 +2008,7 @@ export function bootstrapApp(): void {
     }
 
     void stopVisualization()
+    void stopPlayback()
   })
 
   let resizeRafId: number | null = null

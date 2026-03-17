@@ -4,6 +4,7 @@ const DEFAULT_STATE: AppState = {
   authStatus: 'loading',
   userName: null,
   isRecording: false,
+  isPlayingBack: false,
   hasMicPermission: false,
   audioReady: false,
   analysisFrameSize: 4096,

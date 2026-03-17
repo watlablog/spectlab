@@ -3,11 +3,12 @@ import type { UIElements } from './dom'
 
 export function renderControlsView(elements: UIElements, state: AppState): void {
   const isSignedIn = state.authStatus === 'signed-in'
-  elements.startButton.disabled = !isSignedIn || state.isRecording
-  elements.stopButton.disabled = !isSignedIn || !state.isRecording
-  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording
-  elements.overlapInput.disabled = !isSignedIn || state.isRecording
-  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording
+  elements.startButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.playButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.stopButton.disabled = !isSignedIn || (!state.isRecording && !state.isPlayingBack)
+  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
 
   if (!isSignedIn) {
     elements.micStatus.textContent = 'ログイン後に利用できます。'
@@ -16,6 +17,11 @@ export function renderControlsView(elements: UIElements, state: AppState): void 
 
   if (state.isRecording) {
     elements.micStatus.textContent = '解析中です。停止でリソースを解放します。'
+    return
+  }
+
+  if (state.isPlayingBack) {
+    elements.micStatus.textContent = '再生中です。停止ボタンで停止できます。'
     return
   }
 

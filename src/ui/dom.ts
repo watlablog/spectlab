@@ -6,6 +6,7 @@ export interface UIElements {
   logoutButton: HTMLButtonElement
   micStatus: HTMLParagraphElement
   startButton: HTMLButtonElement
+  playButton: HTMLButtonElement
   stopButton: HTMLButtonElement
   errorMessage: HTMLParagraphElement
   frameSizeSelect: HTMLSelectElement
@@ -83,6 +84,7 @@ export function getUIElements(): UIElements {
     logoutButton: getRequiredElement<HTMLButtonElement>('logout-button', 'button'),
     micStatus: getRequiredElement<HTMLParagraphElement>('mic-status', 'paragraph'),
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),
+    playButton: getRequiredElement<HTMLButtonElement>('play-button', 'button'),
     stopButton: getRequiredElement<HTMLButtonElement>('stop-button', 'button'),
     errorMessage: getRequiredElement<HTMLParagraphElement>('error-message', 'paragraph'),
     frameSizeSelect: getRequiredElement<HTMLSelectElement>('frame-size-select', 'select'),
