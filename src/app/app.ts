@@ -105,6 +105,14 @@ interface FrequencyHistoryRing {
   head: number
 }
 
+interface TimelineSyncState {
+  sampleRateHz: number
+  windowSamples: number
+  plotWidth: number
+  samplesPerColumn: number
+  columnCursorSample: number
+}
+
 function routeToPath(route: AppRoute): string {
   return route === 'recording' ? RECORDING_PATH : LOGIN_PATH
 }
@@ -370,7 +378,13 @@ export function bootstrapApp(): void {
   let authUnsubscribe: (() => void) | null = null
   let frameId: number | null = null
   let lastAnimationTimestamp: number | null = null
-  let columnAccumulatorSeconds = 0
+  let timelineSyncState: TimelineSyncState = {
+    sampleRateHz: 0,
+    windowSamples: 0,
+    plotWidth: 1,
+    samplesPerColumn: 1,
+    columnCursorSample: 0,
+  }
   let renderGateAccumulatorSeconds = 0
   let lastAuthStatus: AuthStatus | null = null
   let freqDragHandle: DragHandle | null = null
@@ -459,6 +473,27 @@ export function bootstrapApp(): void {
     return Math.max(1, Math.floor(elements.canvas.clientWidth))
   }
 
+  const syncTimelineState = (options: { resetCursor: boolean } = { resetCursor: false }): void => {
+    const captureMetrics = audioEngine.getCaptureMetrics()
+    const plotWidth = Math.max(1, getHistoryCapacity())
+    const sampleRateHz = Math.max(0, captureMetrics.sampleRateHz ?? timelineSyncState.sampleRateHz)
+    const fallbackWindowSamples =
+      sampleRateHz > 0 ? Math.max(1, Math.round(sampleRateHz * SPECTROGRAM_WINDOW_SECONDS)) : plotWidth
+    const windowSamples = Math.max(1, captureMetrics.windowSamples || fallbackWindowSamples)
+    const samplesPerColumn = Math.max(1 / plotWidth, windowSamples / plotWidth)
+    const nextCursorSample = options.resetCursor
+      ? captureMetrics.capturedSamplesTotal
+      : timelineSyncState.columnCursorSample
+
+    timelineSyncState = {
+      sampleRateHz,
+      windowSamples,
+      plotWidth,
+      samplesPerColumn,
+      columnCursorSample: nextCursorSample,
+    }
+  }
+
   const initializeHistoryWithSilence = (
     capacity: number,
     bins: number,
@@ -508,12 +543,11 @@ export function bootstrapApp(): void {
   }
 
   const ensureHistoryRingMatchesRenderer = (): void => {
-    if (frequencyHistoryRing.bins <= 0) {
-      return
-    }
-
     const nextCapacity = getHistoryCapacity()
-    ensureHistoryRingLayout(nextCapacity, frequencyHistoryRing.bins)
+    if (frequencyHistoryRing.bins > 0) {
+      ensureHistoryRingLayout(nextCapacity, frequencyHistoryRing.bins)
+    }
+    syncTimelineState({ resetCursor: true })
   }
 
   const appendHistoryColumn = (rawFrequencyData: Float32Array): void => {
@@ -542,27 +576,32 @@ export function bootstrapApp(): void {
     }
   }
 
-  const resolveTimeWindowIndices = (
+  const resolveTimeRangeSlots = (
     timeMinSec: number,
     timeMaxSec: number,
-    timeDomainMinSec: number,
-    timeDomainMaxSec: number,
-    timelineColumns: number,
-  ): { startIndex: number; endIndexExclusive: number } => {
-    const safeTimelineColumns = Math.max(1, timelineColumns)
-    const fullSpanSec = Math.max(MIN_TIME_GAP_SEC, timeDomainMaxSec - timeDomainMinSec)
-    const safeMinSec = clamp(timeMinSec, timeDomainMinSec, timeDomainMaxSec - MIN_TIME_GAP_SEC)
-    const safeMaxSec = clamp(timeMaxSec, safeMinSec + MIN_TIME_GAP_SEC, timeDomainMaxSec)
-    const startRatio = (safeMinSec - timeDomainMinSec) / fullSpanSec
-    const endRatio = (safeMaxSec - timeDomainMinSec) / fullSpanSec
+    domainSec: number,
+    slotCount: number,
+  ): { startSlot: number; endSlotExclusive: number } => {
+    const safeDomainSec = Math.max(MIN_TIME_GAP_SEC, domainSec)
+    const safeSlotCount = Math.max(1, slotCount)
+    const safeMinSec = clamp(timeMinSec, 0, safeDomainSec - MIN_TIME_GAP_SEC)
+    const safeMaxSec = clamp(timeMaxSec, safeMinSec + MIN_TIME_GAP_SEC, safeDomainSec)
+    const startRatio = safeMinSec / safeDomainSec
+    const endRatio = safeMaxSec / safeDomainSec
+    const startSlot = clamp(
+      Math.floor(startRatio * safeSlotCount),
+      0,
+      Math.max(safeSlotCount - 1, 0),
+    )
+    const endSlotExclusive = clamp(
+      Math.ceil(endRatio * safeSlotCount),
+      startSlot + 1,
+      safeSlotCount,
+    )
 
     return {
-      startIndex: clamp(Math.floor(startRatio * safeTimelineColumns), 0, Math.max(safeTimelineColumns - 1, 0)),
-      endIndexExclusive: clamp(
-        Math.ceil(endRatio * safeTimelineColumns),
-        clamp(Math.floor(startRatio * safeTimelineColumns), 0, Math.max(safeTimelineColumns - 1, 0)) + 1,
-        safeTimelineColumns,
-      ),
+      startSlot,
+      endSlotExclusive,
     }
   }
 
@@ -571,8 +610,6 @@ export function bootstrapApp(): void {
     rangeMaxHz: number,
     timeMinSec: number,
     timeMaxSec: number,
-    timeDomainMinSec: number,
-    timeDomainMaxSec: number,
     timelineColumns: number,
     nyquistHz: number,
   ): { history: Float32Array; count: number; bins: number } => {
@@ -582,20 +619,19 @@ export function bootstrapApp(): void {
       return { history: new Float32Array(0), count: 0, bins: 0 }
     }
 
-    const { startIndex, endIndexExclusive } = resolveTimeWindowIndices(
+    const { startSlot, endSlotExclusive } = resolveTimeRangeSlots(
       timeMinSec,
       timeMaxSec,
-      timeDomainMinSec,
-      timeDomainMaxSec,
+      SPECTROGRAM_WINDOW_SECONDS,
       timelineColumns,
     )
-    const selectedCount = Math.max(1, endIndexExclusive - startIndex)
+    const selectedCount = Math.max(1, endSlotExclusive - startSlot)
 
     ensureLinearHistoryBuffer(selectedCount, bins)
     let writeOffset = 0
 
-    for (let timelineIndex = startIndex; timelineIndex < endIndexExclusive; timelineIndex += 1) {
-      const ringIndex = (frequencyHistoryRing.head + timelineIndex) % timelineColumns
+    for (let timelineIndex = startSlot; timelineIndex < endSlotExclusive; timelineIndex += 1) {
+      const ringIndex = (frequencyHistoryRing.head + timelineIndex) % frequencyHistoryRing.capacity
       const sourceOffset = ringIndex * bins
       const rawColumn = frequencyHistoryRing.data.subarray(sourceOffset, sourceOffset + bins)
       const projectedFrequencyData = projectFrequencyRange(rawColumn, rangeMinHz, rangeMaxHz, nyquistHz)
@@ -625,7 +661,6 @@ export function bootstrapApp(): void {
     analysisAccumulatorSamples = 0
     activeHopSamples = 1
     activeSampleRateHz = 0
-    columnAccumulatorSeconds = 0
     renderGateAccumulatorSeconds = 0
     frameTimeEmaMs = 1000 / DESKTOP_QUALITY_PROFILE.renderFps
     aboveLevel1FrameCount = 0
@@ -636,6 +671,7 @@ export function bootstrapApp(): void {
     lastStableColumnData = null
     silenceColumnData = null
     stftTransformer = null
+    timelineSyncState.columnCursorSample = audioEngine.getCaptureMetrics().capturedSamplesTotal
   }
 
   const setLastStableColumn = (source: Float32Array): void => {
@@ -1203,8 +1239,6 @@ export function bootstrapApp(): void {
       state.frequencyMaxHz,
       state.timeMinSec,
       state.timeMaxSec,
-      state.timeDomainMinSec,
-      state.timeDomainMaxSec,
       frequencyHistoryRing.capacity,
       nyquistHz,
     )
@@ -1252,26 +1286,33 @@ export function bootstrapApp(): void {
       return
     }
 
-    const timelineColumns = Math.max(1, frequencyHistoryRing.capacity || getHistoryCapacity())
-    const windowIndices = resolveTimeWindowIndices(
+    const windowSnapshot = audioEngine.getWindowPcmSnapshot()
+    if (!windowSnapshot || windowSnapshot.samples.length <= 0) {
+      stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
+      return
+    }
+
+    const slotCount = Math.max(1, timelineSyncState.plotWidth || frequencyHistoryRing.capacity || getHistoryCapacity())
+    const { startSlot, endSlotExclusive } = resolveTimeRangeSlots(
       state.timeMinSec,
       state.timeMaxSec,
-      state.timeDomainMinSec,
-      state.timeDomainMaxSec,
-      timelineColumns,
+      SPECTROGRAM_WINDOW_SECONDS,
+      slotCount,
     )
-    const windowSec = Math.max(MIN_TIME_GAP_SEC, state.timeDomainMaxSec - state.timeDomainMinSec)
-    const snappedStartSec =
-      ((windowIndices.startIndex / timelineColumns) * windowSec) + state.timeDomainMinSec
-    const snappedEndSec =
-      ((windowIndices.endIndexExclusive / timelineColumns) * windowSec) + state.timeDomainMinSec
+    const windowSamples = Math.max(1, windowSnapshot.samples.length)
+    const startSample = clamp(
+      Math.floor((startSlot / slotCount) * windowSamples),
+      0,
+      Math.max(windowSamples - 1, 0),
+    )
+    const endSampleExclusive = clamp(
+      Math.ceil((endSlotExclusive / slotCount) * windowSamples),
+      startSample + 1,
+      windowSamples,
+    )
+    const playbackSlice = windowSnapshot.samples.subarray(startSample, endSampleExclusive)
 
-    const playbackRange = audioEngine.getRecordedPcmRange(
-      snappedStartSec - state.timeDomainMinSec,
-      snappedEndSec - state.timeDomainMinSec,
-      windowSec,
-    )
-    if (!playbackRange || playbackRange.samples.length <= 0) {
+    if (playbackSlice.length <= 0) {
       stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
       return
     }
@@ -1283,8 +1324,8 @@ export function bootstrapApp(): void {
       await context.resume()
     }
 
-    const playbackSamples = new Float32Array(playbackRange.samples)
-    const buffer = context.createBuffer(1, playbackSamples.length, playbackRange.sampleRateHz)
+    const playbackSamples = new Float32Array(playbackSlice)
+    const buffer = context.createBuffer(1, playbackSamples.length, windowSnapshot.sampleRateHz)
     buffer.copyToChannel(playbackSamples, 0)
 
     const sourceNode = context.createBufferSource()
@@ -1454,7 +1495,6 @@ export function bootstrapApp(): void {
     updateQualityStageFromPerformance(deltaMs)
 
     analysisAccumulatorSamples += deltaSeconds * activeSampleRateHz
-    columnAccumulatorSeconds += deltaSeconds
     renderGateAccumulatorSeconds += deltaSeconds
 
     const qualityProfile = getActiveQualityProfile()
@@ -1474,11 +1514,34 @@ export function bootstrapApp(): void {
       analysisSteps += 1
     }
 
-    const plotWidth = Math.max(renderer.getPlotMetrics().plotWidth, 1)
-    const secondsPerColumn = SPECTROGRAM_WINDOW_SECONDS / plotWidth
-    const maxColumnBacklogSeconds = secondsPerColumn * MAX_COLUMN_BACKLOG_FACTOR
-    if (columnAccumulatorSeconds > maxColumnBacklogSeconds) {
-      columnAccumulatorSeconds = maxColumnBacklogSeconds
+    const captureMetrics = audioEngine.getCaptureMetrics()
+    if (
+      captureMetrics.sampleRateHz &&
+      timelineSyncState.sampleRateHz > 0 &&
+      Math.abs(captureMetrics.sampleRateHz - timelineSyncState.sampleRateHz) > 1e-6
+    ) {
+      if (frequencyHistoryRing.bins > 0) {
+        frequencyHistoryRing = initializeHistoryWithSilence(
+          Math.max(1, getHistoryCapacity()),
+          frequencyHistoryRing.bins,
+          SILENCE_DECIBELS,
+        )
+        historyLinearBuffer = new Float32Array(0)
+        renderHistoryFromBuffer()
+      }
+      syncTimelineState({ resetCursor: true })
+    }
+
+    const currentPlotWidth = Math.max(1, getHistoryCapacity())
+    if (timelineSyncState.plotWidth !== currentPlotWidth || timelineSyncState.windowSamples <= 0) {
+      syncTimelineState({ resetCursor: true })
+    }
+
+    const samplesPerColumn = Math.max(1 / Math.max(1, timelineSyncState.plotWidth), timelineSyncState.samplesPerColumn)
+    const maxColumnBacklogSamples = samplesPerColumn * MAX_COLUMN_BACKLOG_FACTOR
+    const sampleBacklog = captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample
+    if (sampleBacklog > maxColumnBacklogSamples) {
+      timelineSyncState.columnCursorSample = captureMetrics.capturedSamplesTotal - maxColumnBacklogSamples
     }
 
     const renderIntervalSeconds = 1 / Math.max(1, qualityProfile.renderFps)
@@ -1490,13 +1553,19 @@ export function bootstrapApp(): void {
     renderGateAccumulatorSeconds %= renderIntervalSeconds
 
     let columnsDrawn = 0
-    while (columnAccumulatorSeconds >= secondsPerColumn && columnsDrawn < qualityProfile.maxColumnsPerFrame) {
+    let columnsDue = Math.floor(
+      (captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample) / samplesPerColumn,
+    )
+    while (columnsDue > 0 && columnsDrawn < qualityProfile.maxColumnsPerFrame) {
       const columnData = consumeColumnData()
       if (columnData) {
         renderProjectedColumn(state, columnData)
       }
-      columnAccumulatorSeconds -= secondsPerColumn
+      timelineSyncState.columnCursorSample += samplesPerColumn
       columnsDrawn += 1
+      columnsDue = Math.floor(
+        (captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample) / samplesPerColumn,
+      )
     }
 
     frameId = requestAnimationFrame(drawFrame)
@@ -1907,8 +1976,17 @@ export function bootstrapApp(): void {
       const detectedMaxFrequencyHz = Math.min(nyquistFrequencyHz, state.analysisUpperFrequencyHz)
       setFrequencyDomainMax(detectedMaxFrequencyHz)
       configureAnalysisScheduler(state)
+      syncTimelineState({ resetCursor: true })
       stftTransformer = createStftTransformer({ frameSize: state.analysisFrameSize })
-      mergeAnalysisFrame(analyzeCurrentFrame())
+      const initialFrame = analyzeCurrentFrame()
+      const initialBins =
+        initialFrame.length > 0 ? initialFrame.length : stftTransformer.frequencyBinCount
+      if (initialBins > 0) {
+        ensureHistoryRingLayout(getHistoryCapacity(), initialBins)
+        ensureSilenceColumn(initialBins)
+        renderHistoryFromBuffer()
+      }
+      mergeAnalysisFrame(initialFrame)
 
       stateStore.setState({
         isRecording: true,
@@ -2050,8 +2128,8 @@ export function bootstrapApp(): void {
 
       lastAnimationTimestamp = null
       analysisAccumulatorSamples = 0
-      columnAccumulatorSeconds = 0
       renderGateAccumulatorSeconds = 0
+      timelineSyncState.columnCursorSample = audioEngine.getCaptureMetrics().capturedSamplesTotal
       return
     }
 

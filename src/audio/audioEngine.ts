@@ -7,15 +7,24 @@ export interface AudioEngineStartConfig {
   upperFrequencyHz: UpperFrequencyHz
 }
 
+export interface CaptureMetrics {
+  sampleRateHz: number | null
+  capturedSamplesTotal: number
+  windowSamples: number
+}
+
+export interface WindowPcmSnapshot {
+  samples: Float32Array
+  sampleRateHz: number
+  capturedSamplesTotal: number
+}
+
 export interface AudioEngine {
   start(config: AudioEngineStartConfig): Promise<void>
   stop(): Promise<void>
   getTimeDomainData(): Float32Array
-  getRecordedPcmRange(
-    startSec: number,
-    endSec: number,
-    windowSec: number,
-  ): { samples: Float32Array; sampleRateHz: number } | null
+  getCaptureMetrics(): CaptureMetrics
+  getWindowPcmSnapshot(): WindowPcmSnapshot | null
   getMaxFrequencyHz(): number | null
   getSampleRateHz(): number | null
 }
@@ -29,12 +38,14 @@ class BrowserAudioEngine implements AudioEngine {
   private pcmHistory: Float32Array = new Float32Array(0)
   private pcmHistoryHead = 0
   private pcmHistoryCapacity = 0
+  private capturedSamplesTotal = 0
 
   private initializeRecordedHistory(sampleRateHz: number): void {
     this.recordedSampleRateHz = sampleRateHz
     this.pcmHistoryCapacity = Math.max(1, Math.round(sampleRateHz * RECORDING_WINDOW_SECONDS))
     this.pcmHistory = new Float32Array(this.pcmHistoryCapacity)
     this.pcmHistoryHead = 0
+    this.capturedSamplesTotal = 0
   }
 
   private appendPcmFrame(frame: Float32Array): void {
@@ -46,6 +57,7 @@ class BrowserAudioEngine implements AudioEngine {
       const sample = Math.max(-1, Math.min(1, frame[index] ?? 0))
       this.pcmHistory[this.pcmHistoryHead] = sample
       this.pcmHistoryHead = (this.pcmHistoryHead + 1) % this.pcmHistoryCapacity
+      this.capturedSamplesTotal += 1
     }
   }
 
@@ -92,37 +104,30 @@ class BrowserAudioEngine implements AudioEngine {
     return this.pipeline.timeDomainData
   }
 
-  getRecordedPcmRange(
-    startSec: number,
-    endSec: number,
-    windowSec: number,
-  ): { samples: Float32Array; sampleRateHz: number } | null {
+  getCaptureMetrics(): CaptureMetrics {
+    return {
+      sampleRateHz: this.recordedSampleRateHz,
+      capturedSamplesTotal: this.capturedSamplesTotal,
+      windowSamples: this.pcmHistoryCapacity,
+    }
+  }
+
+  getWindowPcmSnapshot(): WindowPcmSnapshot | null {
     if (!this.recordedSampleRateHz || this.pcmHistoryCapacity <= 0 || this.pcmHistory.length <= 0) {
       return null
     }
 
-    const safeWindowSec = Math.max(0.1, windowSec)
-    const safeStartSec = Math.min(Math.max(startSec, 0), safeWindowSec)
-    const safeEndSec = Math.min(
-      Math.max(endSec, safeStartSec + 1 / this.recordedSampleRateHz),
-      safeWindowSec,
-    )
-
-    const startIndexRaw = Math.floor((safeStartSec / safeWindowSec) * this.pcmHistoryCapacity)
-    const endIndexRaw = Math.ceil((safeEndSec / safeWindowSec) * this.pcmHistoryCapacity)
-    const startIndex = Math.min(Math.max(startIndexRaw, 0), this.pcmHistoryCapacity - 1)
-    const endIndexExclusive = Math.min(Math.max(endIndexRaw, startIndex + 1), this.pcmHistoryCapacity)
-    const sampleCount = Math.max(1, endIndexExclusive - startIndex)
-    const samples = new Float32Array(sampleCount)
-
-    for (let index = 0; index < sampleCount; index += 1) {
-      const ringIndex = (this.pcmHistoryHead + startIndex + index) % this.pcmHistoryCapacity
-      samples[index] = this.pcmHistory[ringIndex] ?? 0
+    const samples = new Float32Array(this.pcmHistoryCapacity)
+    const firstChunkLength = this.pcmHistoryCapacity - this.pcmHistoryHead
+    samples.set(this.pcmHistory.subarray(this.pcmHistoryHead), 0)
+    if (this.pcmHistoryHead > 0) {
+      samples.set(this.pcmHistory.subarray(0, this.pcmHistoryHead), firstChunkLength)
     }
 
     return {
       samples,
       sampleRateHz: this.recordedSampleRateHz,
+      capturedSamplesTotal: this.capturedSamplesTotal,
     }
   }
 
