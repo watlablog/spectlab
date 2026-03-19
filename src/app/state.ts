@@ -9,7 +9,7 @@ const DEFAULT_STATE: AppState = {
   audioReady: false,
   analysisFrameSize: 4096,
   analysisOverlapPercent: 75,
-  analysisUpperFrequencyHz: 20000,
+  analysisUpperFrequencyHz: 10000,
   decibelMin: -20,
   decibelMax: 80,
   frequencyDomainMinHz: 0,

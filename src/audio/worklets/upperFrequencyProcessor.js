@@ -3,7 +3,7 @@ class UpperFrequencyProcessor extends AudioWorkletProcessor {
     return [
       {
         name: 'cutoffHz',
-        defaultValue: 20000,
+        defaultValue: 10000,
         minValue: 100,
         maxValue: 24000,
         automationRate: 'k-rate',
@@ -25,7 +25,7 @@ class UpperFrequencyProcessor extends AudioWorkletProcessor {
     }
 
     const cutoffParam = parameters.cutoffHz
-    const cutoffHz = cutoffParam.length > 0 ? cutoffParam[0] : 20000
+    const cutoffHz = cutoffParam.length > 0 ? cutoffParam[0] : 10000
     const normalizedCutoffHz = Math.max(20, Math.min(cutoffHz, sampleRate * 0.5))
     const omega = 2 * Math.PI * normalizedCutoffHz
     const dt = 1 / sampleRate

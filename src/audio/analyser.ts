@@ -1,6 +1,17 @@
 import type { FrameSize, UpperFrequencyHz } from '../app/types'
 
 const UPPER_FREQUENCY_WORKLET_URL = new URL('./worklets/upperFrequencyProcessor.js', import.meta.url)
+const PREFERRED_SAMPLE_RATES_HZ = [16000, 22050, 32000, 44100, 48000, 96000] as const
+
+function resolveAudioContextSampleRate(upperFrequencyHz: UpperFrequencyHz): number {
+  const minimumSampleRateHz = Math.ceil(upperFrequencyHz * 2)
+  for (const candidateHz of PREFERRED_SAMPLE_RATES_HZ) {
+    if (candidateHz >= minimumSampleRateHz) {
+      return candidateHz
+    }
+  }
+  return minimumSampleRateHz
+}
 
 export interface AnalyserPipeline {
   audioContext: AudioContext
@@ -18,9 +29,18 @@ export async function createAnalyserPipeline(
     onPcmFrame?: (frame: Float32Array) => void
   },
 ): Promise<AnalyserPipeline> {
-  const audioContext = new AudioContext()
+  const requestedSampleRateHz = resolveAudioContextSampleRate(options.upperFrequencyHz)
+  const audioContext = new AudioContext({ sampleRate: requestedSampleRateHz })
   if (audioContext.state === 'suspended') {
     await audioContext.resume()
+  }
+
+  if ((audioContext.sampleRate / 2) + 1 < options.upperFrequencyHz) {
+    console.warn(
+      `Requested upper frequency ${options.upperFrequencyHz}Hz, but active Nyquist is ${Math.round(
+        audioContext.sampleRate / 2,
+      )}Hz.`,
+    )
   }
 
   const sourceNode = audioContext.createMediaStreamSource(stream)

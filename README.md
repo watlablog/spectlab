@@ -1,6 +1,6 @@
 # SpectLab
 
-Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `20000`）。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。
+Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `10000`）。`Upper [Hz]` に応じて `AudioContext` のサンプルレートは Nyquist 条件（`sampleRate >= 2 * Upper`）を満たす値を要求します。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。
 
 ## 1. Setup
 
