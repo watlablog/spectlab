@@ -7,6 +7,7 @@ export interface UIElements {
   micStatus: HTMLParagraphElement
   startButton: HTMLButtonElement
   playButton: HTMLButtonElement
+  saveButton: HTMLButtonElement
   stopButton: HTMLButtonElement
   errorMessage: HTMLParagraphElement
   frameSizeSelect: HTMLSelectElement
@@ -85,6 +86,7 @@ export function getUIElements(): UIElements {
     micStatus: getRequiredElement<HTMLParagraphElement>('mic-status', 'paragraph'),
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),
     playButton: getRequiredElement<HTMLButtonElement>('play-button', 'button'),
+    saveButton: getRequiredElement<HTMLButtonElement>('save-button', 'button'),
     stopButton: getRequiredElement<HTMLButtonElement>('stop-button', 'button'),
     errorMessage: getRequiredElement<HTMLParagraphElement>('error-message', 'paragraph'),
     frameSizeSelect: getRequiredElement<HTMLSelectElement>('frame-size-select', 'select'),

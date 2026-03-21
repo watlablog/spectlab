@@ -7,6 +7,7 @@ export interface AppState {
   userName: string | null
   isRecording: boolean
   isPlayingBack: boolean
+  isSavingAudio: boolean
   hasMicPermission: boolean
   audioReady: boolean
   analysisFrameSize: FrameSize

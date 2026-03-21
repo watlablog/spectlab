@@ -1,14 +1,16 @@
 import type { AppState } from '../app/types'
 import type { UIElements } from './dom'
 
-export function renderControlsView(elements: UIElements, state: AppState): void {
+export function renderControlsView(elements: UIElements, state: AppState, hasSavableAudio: boolean): void {
   const isSignedIn = state.authStatus === 'signed-in'
-  elements.startButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
-  elements.playButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.startButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+  elements.playButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+  elements.saveButton.disabled =
+    !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio || !hasSavableAudio
   elements.stopButton.disabled = !isSignedIn || (!state.isRecording && !state.isPlayingBack)
-  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
-  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
-  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack
+  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
 
   if (!isSignedIn) {
     elements.micStatus.textContent = 'ログイン後に利用できます。'
@@ -22,6 +24,11 @@ export function renderControlsView(elements: UIElements, state: AppState): void 
 
   if (state.isPlayingBack) {
     elements.micStatus.textContent = '再生中です。停止ボタンで停止できます。'
+    return
+  }
+
+  if (state.isSavingAudio) {
+    elements.micStatus.textContent = '保存中です。完了までお待ちください。'
     return
   }
 

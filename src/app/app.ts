@@ -40,8 +40,9 @@ const MIN_DECIBEL_GAP = 1
 const DECIBEL_TICK_COUNT = 6
 const SILENCE_DECIBELS = -160
 const MOBILE_BREAKPOINT_PX = 760
-const MAX_ANALYSIS_BACKLOG_HOPS = 3
-const MAX_COLUMN_BACKLOG_FACTOR = 2
+const MAX_ANALYSIS_BACKLOG_HOPS = 24
+const MAX_COLUMN_BACKLOG_FACTOR = 4
+const MAX_PENDING_ANALYSIS_COLUMNS = 256
 const STAGE_DEGRADE_LEVEL1_FRAME_MS = 24
 const STAGE_DEGRADE_LEVEL2_FRAME_MS = 32
 const STAGE_DEGRADE_REQUIRED_FRAMES = 120
@@ -111,6 +112,13 @@ interface TimelineSyncState {
   plotWidth: number
   samplesPerColumn: number
   columnCursorSample: number
+}
+
+interface DisplayedAudioSlice {
+  samples: Float32Array
+  sampleRateHz: number
+  startSample: number
+  endSample: number
 }
 
 function routeToPath(route: AppRoute): string {
@@ -354,6 +362,67 @@ function buildTimeTicks(minSec: number, maxSec: number): number[] {
   return ticks
 }
 
+function encodeWavMono16(samples: Float32Array, sampleRateHz: number): Blob {
+  if (samples.length <= 0) {
+    throw new Error('保存できる音声データがありません。')
+  }
+
+  if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0) {
+    throw new Error('無効なサンプリング周波数です。')
+  }
+
+  const channelCount = 1
+  const bytesPerSample = 2
+  const blockAlign = channelCount * bytesPerSample
+  const byteRate = Math.round(sampleRateHz) * blockAlign
+  const dataSize = samples.length * bytesPerSample
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+
+  const writeAscii = (offset: number, text: string): void => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index))
+    }
+  }
+
+  writeAscii(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  writeAscii(8, 'WAVE')
+  writeAscii(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, channelCount, true)
+  view.setUint32(24, Math.round(sampleRateHz), true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, 16, true)
+  writeAscii(36, 'data')
+  view.setUint32(40, dataSize, true)
+
+  let offset = 44
+  for (let index = 0; index < samples.length; index += 1) {
+    const normalized = clamp(samples[index] ?? 0, -1, 1)
+    const pcmValue = normalized < 0 ? Math.round(normalized * 0x8000) : Math.round(normalized * 0x7fff)
+    view.setInt16(offset, pcmValue, true)
+    offset += bytesPerSample
+  }
+
+  return new Blob([buffer], { type: 'audio/wav' })
+}
+
+function buildAudioFilename(now: Date, timeMinSec: number, timeMaxSec: number): string {
+  const pad2 = (value: number): string => String(value).padStart(2, '0')
+  const year = String(now.getFullYear())
+  const month = pad2(now.getMonth() + 1)
+  const day = pad2(now.getDate())
+  const hour = pad2(now.getHours())
+  const minute = pad2(now.getMinutes())
+  const second = pad2(now.getSeconds())
+  const startLabel = timeMinSec.toFixed(1)
+  const endLabel = timeMaxSec.toFixed(1)
+  return `spectlab_${year}${month}${day}_${hour}${minute}${second}_t${startLabel}-${endLabel}s.wav`
+}
+
 export function bootstrapApp(): void {
   const elements = getUIElements()
   const stateStore = createAppStateStore({
@@ -417,8 +486,7 @@ export function bootstrapApp(): void {
   let aboveLevel2FrameCount = 0
   let belowRecoveryFrameCount = 0
   let resizeObserver: ResizeObserver | null = null
-  let pendingColumnData: Float32Array | null = null
-  let hasPendingColumn = false
+  let pendingColumnQueue: Float32Array[] = []
   let lastStableColumnData: Float32Array | null = null
   let silenceColumnData: Float32Array | null = null
   let stftTransformer: StftTransformer | null = null
@@ -666,8 +734,7 @@ export function bootstrapApp(): void {
     aboveLevel1FrameCount = 0
     aboveLevel2FrameCount = 0
     belowRecoveryFrameCount = 0
-    pendingColumnData = null
-    hasPendingColumn = false
+    pendingColumnQueue = []
     lastStableColumnData = null
     silenceColumnData = null
     stftTransformer = null
@@ -701,32 +768,20 @@ export function bootstrapApp(): void {
 
     ensureSilenceColumn(frame.length)
 
-    if (!pendingColumnData || pendingColumnData.length !== frame.length) {
-      pendingColumnData = new Float32Array(frame.length)
-      pendingColumnData.set(frame)
-      hasPendingColumn = true
-      return
-    }
+    const queuedColumn = new Float32Array(frame.length)
+    queuedColumn.set(frame)
 
-    if (!hasPendingColumn) {
-      pendingColumnData.set(frame)
-      hasPendingColumn = true
-      return
+    if (pendingColumnQueue.length >= MAX_PENDING_ANALYSIS_COLUMNS) {
+      pendingColumnQueue.shift()
     }
-
-    for (let index = 0; index < frame.length; index += 1) {
-      pendingColumnData[index] = Math.max(
-        pendingColumnData[index] ?? SILENCE_DECIBELS,
-        frame[index] ?? SILENCE_DECIBELS,
-      )
-    }
+    pendingColumnQueue.push(queuedColumn)
   }
 
   const consumeColumnData = (): Float32Array | null => {
-    if (pendingColumnData && hasPendingColumn) {
-      setLastStableColumn(pendingColumnData)
-      hasPendingColumn = false
-      return pendingColumnData
+    const queuedColumn = pendingColumnQueue.shift()
+    if (queuedColumn) {
+      setLastStableColumn(queuedColumn)
+      return queuedColumn
     }
 
     if (lastStableColumnData) {
@@ -1255,6 +1310,52 @@ export function bootstrapApp(): void {
   applyRendererLayout()
   updateAxisConfig(stateStore.getState())
 
+  const resolveDisplayedAudioSlice = (state: AppState): DisplayedAudioSlice | null => {
+    const windowSnapshot = audioEngine.getWindowPcmSnapshot()
+    if (!windowSnapshot || windowSnapshot.samples.length <= 0) {
+      return null
+    }
+
+    const slotCount = Math.max(1, timelineSyncState.plotWidth || frequencyHistoryRing.capacity || getHistoryCapacity())
+    const { startSlot, endSlotExclusive } = resolveTimeRangeSlots(
+      state.timeMinSec,
+      state.timeMaxSec,
+      SPECTROGRAM_WINDOW_SECONDS,
+      slotCount,
+    )
+    const windowSamples = Math.max(1, windowSnapshot.samples.length)
+    const startSample = clamp(
+      Math.floor((startSlot / slotCount) * windowSamples),
+      0,
+      Math.max(windowSamples - 1, 0),
+    )
+    const endSample = clamp(
+      Math.ceil((endSlotExclusive / slotCount) * windowSamples),
+      startSample + 1,
+      windowSamples,
+    )
+    const samples = windowSnapshot.samples.subarray(startSample, endSample)
+    if (samples.length <= 0) {
+      return null
+    }
+
+    return {
+      samples,
+      sampleRateHz: windowSnapshot.sampleRateHz,
+      startSample,
+      endSample,
+    }
+  }
+
+  const hasSavableAudioData = (): boolean => {
+    const captureMetrics = audioEngine.getCaptureMetrics()
+    return (
+      (captureMetrics.sampleRateHz ?? 0) > 0 &&
+      captureMetrics.windowSamples > 0 &&
+      captureMetrics.capturedSamplesTotal > 0
+    )
+  }
+
   const stopPlayback = async (): Promise<void> => {
     const activeSource = playbackSourceNode
     const activeContext = playbackContext
@@ -1282,37 +1383,12 @@ export function bootstrapApp(): void {
 
   const startPlayback = async (): Promise<void> => {
     const state = stateStore.getState()
-    if (state.isRecording || state.isPlayingBack) {
+    if (state.isRecording || state.isPlayingBack || state.isSavingAudio) {
       return
     }
 
-    const windowSnapshot = audioEngine.getWindowPcmSnapshot()
-    if (!windowSnapshot || windowSnapshot.samples.length <= 0) {
-      stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
-      return
-    }
-
-    const slotCount = Math.max(1, timelineSyncState.plotWidth || frequencyHistoryRing.capacity || getHistoryCapacity())
-    const { startSlot, endSlotExclusive } = resolveTimeRangeSlots(
-      state.timeMinSec,
-      state.timeMaxSec,
-      SPECTROGRAM_WINDOW_SECONDS,
-      slotCount,
-    )
-    const windowSamples = Math.max(1, windowSnapshot.samples.length)
-    const startSample = clamp(
-      Math.floor((startSlot / slotCount) * windowSamples),
-      0,
-      Math.max(windowSamples - 1, 0),
-    )
-    const endSampleExclusive = clamp(
-      Math.ceil((endSlotExclusive / slotCount) * windowSamples),
-      startSample + 1,
-      windowSamples,
-    )
-    const playbackSlice = windowSnapshot.samples.subarray(startSample, endSampleExclusive)
-
-    if (playbackSlice.length <= 0) {
+    const displayedSlice = resolveDisplayedAudioSlice(state)
+    if (!displayedSlice) {
       stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
       return
     }
@@ -1324,8 +1400,8 @@ export function bootstrapApp(): void {
       await context.resume()
     }
 
-    const playbackSamples = new Float32Array(playbackSlice)
-    const buffer = context.createBuffer(1, playbackSamples.length, windowSnapshot.sampleRateHz)
+    const playbackSamples = new Float32Array(displayedSlice.samples)
+    const buffer = context.createBuffer(1, playbackSamples.length, displayedSlice.sampleRateHz)
     buffer.copyToChannel(playbackSamples, 0)
 
     const sourceNode = context.createBufferSource()
@@ -1347,6 +1423,49 @@ export function bootstrapApp(): void {
     })
 
     sourceNode.start()
+  }
+
+  const saveDisplayedAudio = async (): Promise<void> => {
+    const state = stateStore.getState()
+    if (state.isRecording || state.isPlayingBack || state.isSavingAudio) {
+      return
+    }
+
+    const displayedSlice = resolveDisplayedAudioSlice(state)
+    if (!displayedSlice) {
+      stateStore.setState({ errorMessage: '保存可能な録音データがありません。' })
+      return
+    }
+
+    stateStore.setState({ isSavingAudio: true, errorMessage: null })
+
+    let downloadUrl: string | null = null
+    let anchor: HTMLAnchorElement | null = null
+
+    try {
+      const wavBlob = encodeWavMono16(displayedSlice.samples, displayedSlice.sampleRateHz)
+      downloadUrl = URL.createObjectURL(wavBlob)
+      anchor = document.createElement('a')
+      anchor.href = downloadUrl
+      anchor.download = buildAudioFilename(new Date(), state.timeMinSec, state.timeMaxSec)
+      anchor.style.display = 'none'
+      document.body.append(anchor)
+      anchor.click()
+    } catch (error) {
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, '音声ファイルの保存に失敗しました。'),
+      })
+    } finally {
+      if (anchor) {
+        anchor.remove()
+      }
+      if (downloadUrl) {
+        URL.revokeObjectURL(downloadUrl)
+      }
+      if (stateStore.getState().isSavingAudio) {
+        stateStore.setState({ isSavingAudio: false })
+      }
+    }
   }
 
   const stopVisualization = async (): Promise<void> => {
@@ -1538,9 +1657,18 @@ export function bootstrapApp(): void {
     }
 
     const samplesPerColumn = Math.max(1 / Math.max(1, timelineSyncState.plotWidth), timelineSyncState.samplesPerColumn)
-    const maxColumnBacklogSamples = samplesPerColumn * MAX_COLUMN_BACKLOG_FACTOR
+    const targetColumnsPerSecond = currentPlotWidth / SPECTROGRAM_WINDOW_SECONDS
+    const minimumColumnsPerFrame = Math.max(
+      1,
+      Math.ceil(targetColumnsPerSecond / Math.max(1, qualityProfile.renderFps)),
+    )
+    const maxColumnsPerFrame = Math.max(qualityProfile.maxColumnsPerFrame, minimumColumnsPerFrame + 1)
+    const maxColumnBacklogSamples = Math.max(
+      samplesPerColumn * maxColumnsPerFrame * MAX_COLUMN_BACKLOG_FACTOR,
+      timelineSyncState.sampleRateHz || activeSampleRateHz || 0,
+    )
     const sampleBacklog = captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample
-    if (sampleBacklog > maxColumnBacklogSamples) {
+    if (maxColumnBacklogSamples > 0 && sampleBacklog > maxColumnBacklogSamples) {
       timelineSyncState.columnCursorSample = captureMetrics.capturedSamplesTotal - maxColumnBacklogSamples
     }
 
@@ -1556,7 +1684,7 @@ export function bootstrapApp(): void {
     let columnsDue = Math.floor(
       (captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample) / samplesPerColumn,
     )
-    while (columnsDue > 0 && columnsDrawn < qualityProfile.maxColumnsPerFrame) {
+    while (columnsDue > 0 && columnsDrawn < maxColumnsPerFrame) {
       const columnData = consumeColumnData()
       if (columnData) {
         renderProjectedColumn(state, columnData)
@@ -1600,7 +1728,7 @@ export function bootstrapApp(): void {
     }
 
     renderAuthView(elements, state, authService.isEnabled)
-    renderControlsView(elements, state)
+    renderControlsView(elements, state, hasSavableAudioData())
     renderAnalysisControls(state)
     renderFrequencyControls(state)
     renderDecibelControls(state)
@@ -1640,6 +1768,7 @@ export function bootstrapApp(): void {
       stateStore.setState({
         authStatus: user ? 'signed-in' : 'signed-out',
         userName: user?.displayName ?? user?.email ?? null,
+        isSavingAudio: user ? stateStore.getState().isSavingAudio : false,
       })
 
       if (!user) {
@@ -1959,6 +2088,11 @@ export function bootstrapApp(): void {
       return
     }
 
+    if (state.isSavingAudio) {
+      stateStore.setState({ errorMessage: '保存処理中です。完了後に再度開始してください。' })
+      return
+    }
+
     try {
       await stopPlayback()
       await audioEngine.start({
@@ -2017,12 +2151,45 @@ export function bootstrapApp(): void {
       return
     }
 
+    if (state.isSavingAudio) {
+      stateStore.setState({ errorMessage: '保存処理中です。完了後に再生できます。' })
+      return
+    }
+
     try {
       await startPlayback()
     } catch (error) {
       await stopPlayback()
       stateStore.setState({
         errorMessage: toErrorMessage(error, '音声再生に失敗しました。'),
+      })
+    }
+  })
+
+  elements.saveButton.addEventListener('click', async () => {
+    stateStore.setState({ errorMessage: null })
+
+    const state = stateStore.getState()
+    if (state.authStatus !== 'signed-in') {
+      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+      return
+    }
+
+    if (state.isRecording || state.isPlayingBack) {
+      stateStore.setState({ errorMessage: '停止後に表示範囲を保存できます。' })
+      return
+    }
+
+    if (!hasSavableAudioData()) {
+      stateStore.setState({ errorMessage: '保存可能な録音データがありません。' })
+      return
+    }
+
+    try {
+      await saveDisplayedAudio()
+    } catch (error) {
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, '音声ファイルの保存に失敗しました。'),
       })
     }
   })
