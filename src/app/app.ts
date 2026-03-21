@@ -1,4 +1,4 @@
-import { createAudioEngine } from '../audio/audioEngine'
+import { createAudioEngine, type WindowPcmSnapshot } from '../audio/audioEngine'
 import { createStftTransformer, type StftTransformer } from '../audio/stft'
 import { createAppStateStore } from './state'
 import { getFirebaseConfig } from '../firebase/config'
@@ -43,6 +43,7 @@ const MOBILE_BREAKPOINT_PX = 760
 const MAX_ANALYSIS_BACKLOG_HOPS = 24
 const MAX_COLUMN_BACKLOG_FACTOR = 4
 const MAX_PENDING_ANALYSIS_COLUMNS = 256
+const MAX_DYNAMIC_COLUMNS_PER_FRAME = 256
 const STAGE_DEGRADE_LEVEL1_FRAME_MS = 24
 const STAGE_DEGRADE_LEVEL2_FRAME_MS = 32
 const STAGE_DEGRADE_REQUIRED_FRAMES = 120
@@ -1468,7 +1469,66 @@ export function bootstrapApp(): void {
     }
   }
 
+  const rebuildHistoryFromSnapshot = (snapshot: WindowPcmSnapshot, state: AppState): void => {
+    if (snapshot.samples.length <= 0) {
+      return
+    }
+
+    const frameSize = state.analysisFrameSize
+    const hopSamples = Math.max(
+      1,
+      Math.round(state.analysisFrameSize * (1 - state.analysisOverlapPercent / 100)),
+    )
+    const transformer = createStftTransformer({ frameSize })
+    const bins = transformer.frequencyBinCount
+    if (bins <= 0) {
+      return
+    }
+
+    const capacity = Math.max(1, getHistoryCapacity())
+    const nextRing = initializeHistoryWithSilence(capacity, bins, SILENCE_DECIBELS)
+    const windowSamples = snapshot.samples
+    const safeWindowLength = Math.max(1, windowSamples.length)
+    const maxFrameIndex = Math.max(0, Math.ceil((safeWindowLength - 1) / hopSamples))
+    const frameBuffer = new Float32Array(frameSize)
+    const spectrumCache = new Map<number, Float32Array>()
+
+    const getSpectrumForFrameIndex = (frameIndex: number): Float32Array => {
+      const cached = spectrumCache.get(frameIndex)
+      if (cached) {
+        return cached
+      }
+
+      const frameStart = frameIndex * hopSamples
+      frameBuffer.fill(0)
+      if (frameStart < windowSamples.length) {
+        const frameEnd = Math.min(windowSamples.length, frameStart + frameSize)
+        frameBuffer.set(windowSamples.subarray(frameStart, frameEnd), 0)
+      }
+
+      const transformed = transformer.transform(frameBuffer)
+      const copied = new Float32Array(transformed.length)
+      copied.set(transformed)
+      spectrumCache.set(frameIndex, copied)
+      return copied
+    }
+
+    for (let columnIndex = 0; columnIndex < capacity; columnIndex += 1) {
+      const ratio = capacity > 1 ? columnIndex / (capacity - 1) : 0
+      const samplePosition = ratio * (safeWindowLength - 1)
+      const frameIndex = clamp(Math.floor(samplePosition / hopSamples), 0, maxFrameIndex)
+      const spectrum = getSpectrumForFrameIndex(frameIndex)
+      nextRing.data.set(spectrum, columnIndex * bins)
+    }
+
+    frequencyHistoryRing = nextRing
+    historyLinearBuffer = new Float32Array(0)
+  }
+
   const stopVisualization = async (): Promise<void> => {
+    const stateBeforeStop = stateStore.getState()
+    const snapshotBeforeStop = stateBeforeStop.isRecording ? audioEngine.getWindowPcmSnapshot() : null
+
     if (frameId !== null) {
       cancelAnimationFrame(frameId)
       frameId = null
@@ -1489,6 +1549,17 @@ export function bootstrapApp(): void {
 
     lastAnimationTimestamp = null
     resetAnalysisBuffers()
+
+    if (snapshotBeforeStop) {
+      try {
+        rebuildHistoryFromSnapshot(snapshotBeforeStop, stateBeforeStop)
+        renderHistoryFromBuffer()
+      } catch (error) {
+        stateStore.setState({
+          errorMessage: toErrorMessage(error, '停止後の再解析に失敗しました。'),
+        })
+      }
+    }
   }
 
   const configureAnalysisScheduler = (state: AppState): void => {
@@ -1662,12 +1733,18 @@ export function bootstrapApp(): void {
       1,
       Math.ceil(targetColumnsPerSecond / Math.max(1, qualityProfile.renderFps)),
     )
-    const maxColumnsPerFrame = Math.max(qualityProfile.maxColumnsPerFrame, minimumColumnsPerFrame + 1)
+    const baselineMaxColumnsPerFrame = Math.max(qualityProfile.maxColumnsPerFrame, minimumColumnsPerFrame + 1)
+    const sampleBacklog = captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample
+    const columnsDueBeforeClamp = Math.floor(sampleBacklog / samplesPerColumn)
+    const maxColumnsPerFrame = clamp(
+      Math.max(baselineMaxColumnsPerFrame, columnsDueBeforeClamp),
+      baselineMaxColumnsPerFrame,
+      MAX_DYNAMIC_COLUMNS_PER_FRAME,
+    )
     const maxColumnBacklogSamples = Math.max(
       samplesPerColumn * maxColumnsPerFrame * MAX_COLUMN_BACKLOG_FACTOR,
-      timelineSyncState.sampleRateHz || activeSampleRateHz || 0,
+      (timelineSyncState.sampleRateHz || activeSampleRateHz || 0) * SPECTROGRAM_WINDOW_SECONDS,
     )
-    const sampleBacklog = captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample
     if (maxColumnBacklogSamples > 0 && sampleBacklog > maxColumnBacklogSamples) {
       timelineSyncState.columnCursorSample = captureMetrics.capturedSamplesTotal - maxColumnBacklogSamples
     }

@@ -39,6 +39,7 @@ firebase deploy --only hosting
 - `Overlap [%]` は Enter で確定し、`0-99` 範囲外や非数値は復帰する
 - dBカラーバーに目盛りが表示され、`Max/Min` のEnter確定で色レンジが更新される
 - 停止中に `表示範囲を保存` で現在の `Time.Min..Time.Max` がWAV保存される
+- 停止時に直近10秒の取得PCMから再解析し、最終表示を補正する
 
 ### Auth
 - Googleログイン成功後にユーザー表示が切り替わる
