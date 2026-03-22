@@ -76,9 +76,14 @@ body {
   padding-bottom: 4.2rem;
 }
 
+.app-title {
+  margin: 0;
+  text-align: center;
+}
+
 .control-panel {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   gap: 1rem;
   padding: 1rem 1.15rem;
@@ -99,12 +104,6 @@ body {
 .user-name {
   margin: 0.2rem 0 0;
   color: var(--text-muted);
-}
-
-.button-row {
-  display: flex;
-  gap: 0.65rem;
-  flex-wrap: wrap;
 }
 
 .analysis-settings {
@@ -198,11 +197,93 @@ body {
   padding: 0.85rem;
 }
 
+.analysis-settings-panel {
+  padding: 0.85rem 0.95rem;
+}
+
+.analysis-settings-panel .analysis-settings {
+  align-items: end;
+}
+
 .y-axis-area {
   display: grid;
-  grid-template-rows: auto auto;
+  grid-template-rows: auto auto auto auto;
   align-items: start;
   gap: 0.7rem;
+}
+
+.graph-action-widget {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.graph-action-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  min-height: 40px;
+  border-radius: 11px;
+  padding: 0.5rem 0.62rem;
+}
+
+.action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.record-toggle-icons {
+  position: relative;
+  width: 16px;
+  height: 16px;
+}
+
+.record-toggle-icons .action-icon {
+  position: absolute;
+  inset: 0;
+  display: none;
+}
+
+.action-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.3;
+}
+
+.action-label {
+  font-size: 0.82rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.record-toggle-button .action-label-stop {
+  display: none;
+}
+
+.record-toggle-button:not(.is-recording) .action-icon-record {
+  display: inline-flex;
+}
+
+.record-toggle-button.is-recording .action-icon-record,
+.record-toggle-button.is-recording .action-label-record {
+  display: none;
+}
+
+.record-toggle-button.is-recording .action-icon-record-stop,
+.record-toggle-button.is-recording .action-label-stop {
+  display: inline-flex;
+}
+
+.record-toggle-button.is-recording {
+  background: #7d3030;
+}
+
+.record-toggle-button.is-recording:hover:enabled {
+  background: #934040;
 }
 
 .y-range-row {
@@ -462,6 +543,87 @@ body {
   color: var(--text-muted);
 }
 
+.playback-widget {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.playback-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  min-width: 104px;
+  padding-inline: 0.8rem;
+  white-space: nowrap;
+}
+
+.playback-toggle-icons {
+  position: relative;
+  width: 16px;
+  height: 16px;
+}
+
+.playback-icon {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.playback-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 2.3;
+}
+
+.playback-toggle-text-stop {
+  display: none;
+}
+
+.playback-toggle-button.is-playing .playback-icon-play,
+.playback-toggle-button.is-playing .playback-toggle-text-play {
+  display: none;
+}
+
+.playback-toggle-button.is-playing .playback-icon-stop,
+.playback-toggle-button.is-playing .playback-toggle-text-stop {
+  display: inline-flex;
+}
+
+.playback-toggle-button:not(.is-playing) .playback-icon-play {
+  display: inline-flex;
+}
+
+.playback-progress-track {
+  position: relative;
+  min-width: 0;
+  height: 10px;
+  border: 1px solid rgba(141, 189, 255, 0.32);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(16, 38, 68, 0.72);
+}
+
+.playback-progress-fill {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #56a6ff 0%, #79d3ff 100%);
+}
+
+.playback-time-label {
+  min-width: 6.8rem;
+  text-align: right;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .range-controls {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -533,16 +695,30 @@ body {
     align-items: flex-start;
   }
 
-  .button-row {
-    width: 100%;
+  .graph-action-widget {
+    gap: 0.42rem;
   }
 
-  .btn {
-    flex: 1;
+  .graph-action-button {
+    min-height: 38px;
+    padding: 0.46rem 0.38rem;
+  }
+
+  .action-label {
+    font-size: 0.74rem;
   }
 
   .plot-area {
     grid-template-columns: 1fr 112px;
+  }
+
+  .playback-widget {
+    gap: 0.5rem;
+  }
+
+  .playback-time-label {
+    min-width: 6rem;
+    font-size: 0.73rem;
   }
 
   .range-controls {

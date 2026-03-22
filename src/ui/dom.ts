@@ -6,9 +6,18 @@ export interface UIElements {
   logoutButton: HTMLButtonElement
   micStatus: HTMLParagraphElement
   startButton: HTMLButtonElement
-  playButton: HTMLButtonElement
+  recordActionIcon: HTMLSpanElement
+  recordStopActionIcon: HTMLSpanElement
+  clearButton: HTMLButtonElement
+  clearActionIcon: HTMLSpanElement
+  saveActionIcon: HTMLSpanElement
+  playbackToggleButton: HTMLButtonElement
+  playbackIconPlay: HTMLSpanElement
+  playbackIconStop: HTMLSpanElement
+  playbackProgressTrack: HTMLDivElement
+  playbackProgressFill: HTMLDivElement
+  playbackTimeLabel: HTMLDivElement
   saveButton: HTMLButtonElement
-  stopButton: HTMLButtonElement
   errorMessage: HTMLParagraphElement
   frameSizeSelect: HTMLSelectElement
   overlapInput: HTMLInputElement
@@ -37,7 +46,7 @@ export interface UIElements {
 
 function getRequiredElement<T extends HTMLElement>(
   id: string,
-  typeName: 'canvas' | 'button' | 'paragraph' | 'section' | 'div' | 'input' | 'select',
+  typeName: 'canvas' | 'button' | 'paragraph' | 'section' | 'div' | 'input' | 'select' | 'span',
 ): T {
   const element = document.getElementById(id)
 
@@ -73,6 +82,10 @@ function getRequiredElement<T extends HTMLElement>(
     throw new Error(`Element #${id} is not a select.`)
   }
 
+  if (typeName === 'span' && !(element instanceof HTMLSpanElement)) {
+    throw new Error(`Element #${id} is not a span.`)
+  }
+
   return element as T
 }
 
@@ -85,9 +98,18 @@ export function getUIElements(): UIElements {
     logoutButton: getRequiredElement<HTMLButtonElement>('logout-button', 'button'),
     micStatus: getRequiredElement<HTMLParagraphElement>('mic-status', 'paragraph'),
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),
-    playButton: getRequiredElement<HTMLButtonElement>('play-button', 'button'),
+    recordActionIcon: getRequiredElement<HTMLSpanElement>('record-action-icon', 'span'),
+    recordStopActionIcon: getRequiredElement<HTMLSpanElement>('record-stop-action-icon', 'span'),
+    clearButton: getRequiredElement<HTMLButtonElement>('clear-button', 'button'),
+    clearActionIcon: getRequiredElement<HTMLSpanElement>('clear-action-icon', 'span'),
+    saveActionIcon: getRequiredElement<HTMLSpanElement>('save-action-icon', 'span'),
+    playbackToggleButton: getRequiredElement<HTMLButtonElement>('playback-toggle-button', 'button'),
+    playbackIconPlay: getRequiredElement<HTMLSpanElement>('playback-icon-play', 'span'),
+    playbackIconStop: getRequiredElement<HTMLSpanElement>('playback-icon-stop', 'span'),
+    playbackProgressTrack: getRequiredElement<HTMLDivElement>('playback-progress-track', 'div'),
+    playbackProgressFill: getRequiredElement<HTMLDivElement>('playback-progress-fill', 'div'),
+    playbackTimeLabel: getRequiredElement<HTMLDivElement>('playback-time-label', 'div'),
     saveButton: getRequiredElement<HTMLButtonElement>('save-button', 'button'),
-    stopButton: getRequiredElement<HTMLButtonElement>('stop-button', 'button'),
     errorMessage: getRequiredElement<HTMLParagraphElement>('error-message', 'paragraph'),
     frameSizeSelect: getRequiredElement<HTMLSelectElement>('frame-size-select', 'select'),
     overlapInput: getRequiredElement<HTMLInputElement>('overlap-input', 'input'),

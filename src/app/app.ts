@@ -1,5 +1,5 @@
-import { createAudioEngine, type WindowPcmSnapshot } from '../audio/audioEngine'
-import { createStftTransformer, type StftTransformer } from '../audio/stft'
+import { createAudioEngine, type CaptureChunk } from '../audio/audioEngine'
+import { createAnalysisService, type AnalysisSnapshot } from '../audio/analysisService'
 import { createAppStateStore } from './state'
 import { getFirebaseConfig } from '../firebase/config'
 import { createAuthService } from '../firebase/auth'
@@ -9,6 +9,7 @@ import { renderAuthView } from '../ui/authView'
 import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
 import { isMicrophonePermissionError, toErrorMessage } from '../utils/errors'
+import { Circle, createElement as createLucideElement, Download, Eraser, Play, Square } from 'lucide'
 import type { AppState, AuthStatus, FrameSize, UpperFrequencyHz } from './types'
 
 const SPECTROGRAM_WINDOW_SECONDS = 10
@@ -111,8 +112,7 @@ interface TimelineSyncState {
   sampleRateHz: number
   windowSamples: number
   plotWidth: number
-  samplesPerColumn: number
-  columnCursorSample: number
+  capturedSamples: number
 }
 
 interface DisplayedAudioSlice {
@@ -442,18 +442,20 @@ export function bootstrapApp(): void {
     timeMaxSec: TIME_DOMAIN_MAX_SEC,
   })
   const audioEngine = createAudioEngine()
+  const analysisService = createAnalysisService()
   const renderer = createRenderer()
   renderer.init(elements.canvas)
 
   let authUnsubscribe: (() => void) | null = null
+  let captureChunkUnsubscribe: (() => void) | null = null
+  let analysisColumnsUnsubscribe: (() => void) | null = null
   let frameId: number | null = null
   let lastAnimationTimestamp: number | null = null
   let timelineSyncState: TimelineSyncState = {
-    sampleRateHz: 0,
-    windowSamples: 0,
+    sampleRateHz: analysisService.getSampleRateHz(),
+    windowSamples: Math.round(analysisService.getSampleRateHz() * SPECTROGRAM_WINDOW_SECONDS),
     plotWidth: 1,
-    samplesPerColumn: 1,
-    columnCursorSample: 0,
+    capturedSamples: 0,
   }
   let renderGateAccumulatorSeconds = 0
   let lastAuthStatus: AuthStatus | null = null
@@ -478,9 +480,6 @@ export function bootstrapApp(): void {
   let lastRenderedDecibelMax: number | null = null
   let lastRenderedTimeMinSec: number | null = null
   let lastRenderedTimeMaxSec: number | null = null
-  let analysisAccumulatorSamples = 0
-  let activeHopSamples = 1
-  let activeSampleRateHz = 0
   let activeQualityStageIndex = 0
   let frameTimeEmaMs = 1000 / DESKTOP_QUALITY_PROFILE.renderFps
   let aboveLevel1FrameCount = 0
@@ -488,11 +487,17 @@ export function bootstrapApp(): void {
   let belowRecoveryFrameCount = 0
   let resizeObserver: ResizeObserver | null = null
   let pendingColumnQueue: Float32Array[] = []
-  let lastStableColumnData: Float32Array | null = null
-  let silenceColumnData: Float32Array | null = null
-  let stftTransformer: StftTransformer | null = null
+  let renderHistoryRafId: number | null = null
+  let isHistoryRenderRequested = false
+  let historyResyncInFlight = false
+  let latestPcmWindow48k: Float32Array<ArrayBufferLike> = new Float32Array(0)
+  let latestCapturedSamples48k = 0
+  let conservativeMode = false
   let playbackContext: AudioContext | null = null
   let playbackSourceNode: AudioBufferSourceNode | null = null
+  let playbackProgressRafId: number | null = null
+  let playbackStartTimeSec = 0
+  let playbackDurationSec = 0
   const axisConfig: AxisRenderConfig = {
     timeWindowSec: SPECTROGRAM_WINDOW_SECONDS,
     timeLabelOffsetSec: 0,
@@ -501,6 +506,60 @@ export function bootstrapApp(): void {
     xTicksSec: [0, 2, 4, 6, 8, 10],
     yTickCount: FREQUENCY_TICK_COUNT,
   }
+  elements.recordActionIcon.replaceChildren(
+    createLucideElement(Circle, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.recordStopActionIcon.replaceChildren(
+    createLucideElement(Square, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.clearActionIcon.replaceChildren(
+    createLucideElement(Eraser, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.saveActionIcon.replaceChildren(
+    createLucideElement(Download, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.playbackIconPlay.replaceChildren(
+    createLucideElement(Play, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.playbackIconStop.replaceChildren(
+    createLucideElement(Square, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
 
   const updateRouteVisibility = (route: AppRoute): void => {
     elements.loginPage.hidden = route !== 'login'
@@ -536,30 +595,21 @@ export function bootstrapApp(): void {
 
   const getHistoryCapacity = (): number => {
     const directWidth = renderer.getPlotMetrics().plotWidth
-    if (directWidth > 0) {
-      return directWidth
+    const fallbackWidth = Math.max(1, Math.floor(elements.canvas.clientWidth))
+    if (directWidth <= 1) {
+      return fallbackWidth
     }
-    return Math.max(1, Math.floor(elements.canvas.clientWidth))
+    return Math.max(directWidth, fallbackWidth)
   }
 
-  const syncTimelineState = (options: { resetCursor: boolean } = { resetCursor: false }): void => {
-    const captureMetrics = audioEngine.getCaptureMetrics()
+  const syncTimelineState = (): void => {
+    const sampleRateHz = Math.max(1, analysisService.getSampleRateHz())
     const plotWidth = Math.max(1, getHistoryCapacity())
-    const sampleRateHz = Math.max(0, captureMetrics.sampleRateHz ?? timelineSyncState.sampleRateHz)
-    const fallbackWindowSamples =
-      sampleRateHz > 0 ? Math.max(1, Math.round(sampleRateHz * SPECTROGRAM_WINDOW_SECONDS)) : plotWidth
-    const windowSamples = Math.max(1, captureMetrics.windowSamples || fallbackWindowSamples)
-    const samplesPerColumn = Math.max(1 / plotWidth, windowSamples / plotWidth)
-    const nextCursorSample = options.resetCursor
-      ? captureMetrics.capturedSamplesTotal
-      : timelineSyncState.columnCursorSample
-
     timelineSyncState = {
       sampleRateHz,
-      windowSamples,
+      windowSamples: Math.max(1, Math.round(sampleRateHz * SPECTROGRAM_WINDOW_SECONDS)),
       plotWidth,
-      samplesPerColumn,
-      columnCursorSample: nextCursorSample,
+      capturedSamples: latestCapturedSamples48k,
     }
   }
 
@@ -616,7 +666,8 @@ export function bootstrapApp(): void {
     if (frequencyHistoryRing.bins > 0) {
       ensureHistoryRingLayout(nextCapacity, frequencyHistoryRing.bins)
     }
-    syncTimelineState({ resetCursor: true })
+    syncTimelineState()
+    analysisService.setPlotWidth(nextCapacity)
   }
 
   const appendHistoryColumn = (rawFrequencyData: Float32Array): void => {
@@ -726,73 +777,100 @@ export function bootstrapApp(): void {
     historyLinearBuffer = new Float32Array(0)
   }
 
+  const setHistoryFromLinear = (history: Float32Array, count: number, bins: number): void => {
+    const capacity = Math.max(1, getHistoryCapacity())
+    if (bins <= 0 || count <= 0 || history.length <= 0) {
+      resetFrequencyHistory()
+      return
+    }
+
+    ensureHistoryRingLayout(capacity, bins)
+    frequencyHistoryRing.data.fill(SILENCE_DECIBELS)
+
+    for (let columnIndex = 0; columnIndex < capacity; columnIndex += 1) {
+      const sourceColumnIndex = count <= 1 ? 0 : Math.floor((columnIndex / Math.max(capacity - 1, 1)) * (count - 1))
+      const sourceOffset = sourceColumnIndex * bins
+      const targetOffset = columnIndex * bins
+      frequencyHistoryRing.data.set(history.subarray(sourceOffset, sourceOffset + bins), targetOffset)
+    }
+
+    frequencyHistoryRing.head = 0
+    frequencyHistoryRing.count = capacity
+    historyLinearBuffer = new Float32Array(0)
+  }
+
+  const requestHistoryRender = (): void => {
+    isHistoryRenderRequested = true
+    if (renderHistoryRafId !== null) {
+      return
+    }
+
+    renderHistoryRafId = requestAnimationFrame(() => {
+      renderHistoryRafId = null
+      if (!isHistoryRenderRequested) {
+        return
+      }
+      isHistoryRenderRequested = false
+      renderHistoryFromBuffer()
+    })
+  }
+
+  const syncHistoryFromWorker = async (): Promise<void> => {
+    if (historyResyncInFlight) {
+      return
+    }
+    historyResyncInFlight = true
+
+    try {
+      const snapshot = await analysisService.requestHistorySnapshot()
+      latestPcmWindow48k = snapshot.pcmWindow48k
+      latestCapturedSamples48k = snapshot.capturedSamples48k
+      timelineSyncState.capturedSamples = snapshot.capturedSamples48k
+      timelineSyncState.sampleRateHz = snapshot.sampleRateHz
+      timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
+      setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
+      requestHistoryRender()
+    } catch (error) {
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, '解析履歴の同期に失敗しました。'),
+      })
+    } finally {
+      historyResyncInFlight = false
+    }
+  }
+
   const resetAnalysisBuffers = (): void => {
-    analysisAccumulatorSamples = 0
-    activeHopSamples = 1
-    activeSampleRateHz = 0
     renderGateAccumulatorSeconds = 0
     frameTimeEmaMs = 1000 / DESKTOP_QUALITY_PROFILE.renderFps
     aboveLevel1FrameCount = 0
     aboveLevel2FrameCount = 0
     belowRecoveryFrameCount = 0
     pendingColumnQueue = []
-    lastStableColumnData = null
-    silenceColumnData = null
-    stftTransformer = null
-    timelineSyncState.columnCursorSample = audioEngine.getCaptureMetrics().capturedSamplesTotal
+    syncTimelineState()
   }
 
-  const setLastStableColumn = (source: Float32Array): void => {
-    if (!lastStableColumnData || lastStableColumnData.length !== source.length) {
-      lastStableColumnData = new Float32Array(source.length)
-    }
-    lastStableColumnData.set(source)
-  }
-
-  const ensureSilenceColumn = (length: number): void => {
-    if (length <= 0) {
+  const mergeAnalysisFrame = (column: Float32Array): void => {
+    if (column.length === 0) {
       return
     }
-
-    if (silenceColumnData && silenceColumnData.length === length) {
-      return
-    }
-
-    silenceColumnData = new Float32Array(length)
-    silenceColumnData.fill(SILENCE_DECIBELS)
-  }
-
-  const mergeAnalysisFrame = (frame: Float32Array): void => {
-    if (frame.length === 0) {
-      return
-    }
-
-    ensureSilenceColumn(frame.length)
-
-    const queuedColumn = new Float32Array(frame.length)
-    queuedColumn.set(frame)
 
     if (pendingColumnQueue.length >= MAX_PENDING_ANALYSIS_COLUMNS) {
-      pendingColumnQueue.shift()
+      pendingColumnQueue.splice(0, Math.floor(MAX_PENDING_ANALYSIS_COLUMNS / 2))
+      if (!historyResyncInFlight) {
+        void syncHistoryFromWorker()
+      }
     }
+
+    const queuedColumn = new Float32Array(column.length)
+    queuedColumn.set(column)
     pendingColumnQueue.push(queuedColumn)
   }
 
   const consumeColumnData = (): Float32Array | null => {
     const queuedColumn = pendingColumnQueue.shift()
     if (queuedColumn) {
-      setLastStableColumn(queuedColumn)
       return queuedColumn
     }
-
-    if (lastStableColumnData) {
-      return lastStableColumnData
-    }
-
-    if (silenceColumnData) {
-      return silenceColumnData
-    }
-
     return null
   }
 
@@ -873,10 +951,11 @@ export function bootstrapApp(): void {
 
   const renderDecibelControls = (state: AppState): void => {
     const isSignedIn = state.authStatus === 'signed-in'
-    elements.dbMinInput.disabled = !isSignedIn
-    elements.dbMaxInput.disabled = !isSignedIn
-    elements.dbHandleMin.disabled = !isSignedIn
-    elements.dbHandleMax.disabled = !isSignedIn
+    const isLocked = !isSignedIn || (conservativeMode && state.isRecording)
+    elements.dbMinInput.disabled = isLocked
+    elements.dbMaxInput.disabled = isLocked
+    elements.dbHandleMin.disabled = isLocked
+    elements.dbHandleMax.disabled = isLocked
 
     elements.dbMinInput.min = String(DECIBEL_INPUT_MIN)
     elements.dbMinInput.max = String(state.decibelMax - MIN_DECIBEL_GAP)
@@ -907,10 +986,11 @@ export function bootstrapApp(): void {
 
   const renderFrequencyControls = (state: AppState): void => {
     const isSignedIn = state.authStatus === 'signed-in'
-    elements.freqMinInput.disabled = !isSignedIn
-    elements.freqMaxInput.disabled = !isSignedIn
-    elements.freqHandleMin.disabled = !isSignedIn
-    elements.freqHandleMax.disabled = !isSignedIn
+    const isLocked = !isSignedIn || (conservativeMode && state.isRecording)
+    elements.freqMinInput.disabled = isLocked
+    elements.freqMaxInput.disabled = isLocked
+    elements.freqHandleMin.disabled = isLocked
+    elements.freqHandleMax.disabled = isLocked
 
     elements.freqMinInput.step = String(FREQUENCY_STEP_HZ)
     elements.freqMaxInput.step = String(FREQUENCY_STEP_HZ)
@@ -950,7 +1030,7 @@ export function bootstrapApp(): void {
 
   const renderTimeControls = (state: AppState): void => {
     const isSignedIn = state.authStatus === 'signed-in'
-    const lockTimeRange = !isSignedIn || state.isPlayingBack
+    const lockTimeRange = !isSignedIn || state.isPlayingBack || state.isRecording || conservativeMode
     elements.timeMinInput.disabled = lockTimeRange
     elements.timeMaxInput.disabled = lockTimeRange
     elements.timeHandleMin.disabled = lockTimeRange
@@ -1013,6 +1093,15 @@ export function bootstrapApp(): void {
     }
 
     stateStore.setState({ analysisOverlapPercent: parsedPercent })
+    const refreshedState = stateStore.getState()
+    if (!refreshedState.isRecording) {
+      analysisService.start({
+        frameSize: refreshedState.analysisFrameSize,
+        overlapPercent: refreshedState.analysisOverlapPercent,
+        plotWidth: Math.max(1, getHistoryCapacity()),
+      })
+      void syncHistoryFromWorker()
+    }
   }
 
   const restoreDecibelInputs = (): void => {
@@ -1049,6 +1138,10 @@ export function bootstrapApp(): void {
 
   const commitDecibelInput = (target: DragHandle): void => {
     const state = stateStore.getState()
+    if (conservativeMode && state.isRecording) {
+      restoreDecibelInputs()
+      return
+    }
     const inputEl = target === 'min' ? elements.dbMinInput : elements.dbMaxInput
     const parsedDb = parseDecibelInput(inputEl.value)
     if (parsedDb === null) {
@@ -1118,6 +1211,10 @@ export function bootstrapApp(): void {
 
   const commitFrequencyInput = (target: DragHandle): void => {
     const state = stateStore.getState()
+    if (conservativeMode && state.isRecording) {
+      restoreFrequencyInputs()
+      return
+    }
     const inputEl = target === 'min' ? elements.freqMinInput : elements.freqMaxInput
     const parsedHz = parseFrequencyInput(inputEl.value)
 
@@ -1149,6 +1246,10 @@ export function bootstrapApp(): void {
 
   const commitTimeInput = (target: DragHandle): void => {
     const state = stateStore.getState()
+    if (state.isRecording || state.isPlayingBack || conservativeMode) {
+      restoreTimeInputs()
+      return
+    }
     const inputEl = target === 'min' ? elements.timeMinInput : elements.timeMaxInput
     const parsedSec = parseTimeInput(inputEl.value)
 
@@ -1289,7 +1390,7 @@ export function bootstrapApp(): void {
       return
     }
 
-    const nyquistHz = audioEngine.getMaxFrequencyHz() ?? state.frequencyDomainMaxHz
+    const nyquistHz = Math.max(state.frequencyDomainMaxHz, timelineSyncState.sampleRateHz / 2)
     const projectedHistory = sampleHistoryByTimeWindow(
       state.frequencyMinHz,
       state.frequencyMaxHz,
@@ -1307,13 +1408,80 @@ export function bootstrapApp(): void {
     )
   }
 
+  const formatPlaybackClock = (seconds: number): string => {
+    const safeSeconds = Math.max(0, Math.floor(seconds))
+    const minutes = Math.floor(safeSeconds / 60)
+    const secondsPart = safeSeconds % 60
+    return `${String(minutes).padStart(2, '0')}:${String(secondsPart).padStart(2, '0')}`
+  }
+
+  const setPlaybackProgressUi = (elapsedSec: number, durationSec: number): void => {
+    const safeDurationSec = Math.max(0, durationSec)
+    const safeElapsedSec = clamp(elapsedSec, 0, safeDurationSec)
+    const ratio = safeDurationSec > 0 ? safeElapsedSec / safeDurationSec : 0
+    elements.playbackProgressFill.style.width = `${ratio * 100}%`
+    elements.playbackProgressTrack.setAttribute('aria-valuenow', String(Math.round(ratio * 100)))
+    elements.playbackTimeLabel.textContent = `${formatPlaybackClock(safeElapsedSec)} / ${formatPlaybackClock(safeDurationSec)}`
+  }
+
+  const stopPlaybackProgressLoop = (): void => {
+    if (playbackProgressRafId !== null) {
+      cancelAnimationFrame(playbackProgressRafId)
+      playbackProgressRafId = null
+    }
+  }
+
+  const startPlaybackProgressLoop = (): void => {
+    stopPlaybackProgressLoop()
+    const tick = (): void => {
+      if (!stateStore.getState().isPlayingBack || !playbackContext) {
+        playbackProgressRafId = null
+        return
+      }
+
+      const elapsedSec = Math.max(0, playbackContext.currentTime - playbackStartTimeSec)
+      setPlaybackProgressUi(elapsedSec, playbackDurationSec)
+      playbackProgressRafId = requestAnimationFrame(tick)
+    }
+
+    tick()
+  }
+
+  const renderPlaybackWidget = (state: AppState, hasSavableAudio: boolean): void => {
+    const isSignedIn = state.authStatus === 'signed-in'
+    const canTogglePlayback = isSignedIn && !state.isRecording && !state.isSavingAudio && hasSavableAudio
+    elements.playbackToggleButton.disabled = !canTogglePlayback
+    elements.playbackToggleButton.classList.toggle('is-playing', state.isPlayingBack)
+    elements.playbackToggleButton.setAttribute('aria-label', state.isPlayingBack ? 'Stop playback' : 'Play visible range')
+
+    if (!state.isPlayingBack) {
+      const selectedDurationSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
+      setPlaybackProgressUi(0, selectedDurationSec)
+    }
+  }
+
   elements.canvas.dataset.dprCap = String(getActiveQualityProfile().dprCap)
   applyRendererLayout()
   updateAxisConfig(stateStore.getState())
+  analysisColumnsUnsubscribe = analysisService.subscribeColumns((column) => {
+    latestCapturedSamples48k = column.capturedSamples48k
+    timelineSyncState.capturedSamples = column.capturedSamples48k
+    mergeAnalysisFrame(column.spectrum)
+    if (stateStore.getState().isRecording && frameId === null) {
+      lastAnimationTimestamp = null
+      frameId = requestAnimationFrame(drawFrame)
+    }
+  })
+  const initialState = stateStore.getState()
+  analysisService.start({
+    frameSize: initialState.analysisFrameSize,
+    overlapPercent: initialState.analysisOverlapPercent,
+    plotWidth: Math.max(1, getHistoryCapacity()),
+  })
+  void syncHistoryFromWorker()
 
   const resolveDisplayedAudioSlice = (state: AppState): DisplayedAudioSlice | null => {
-    const windowSnapshot = audioEngine.getWindowPcmSnapshot()
-    if (!windowSnapshot || windowSnapshot.samples.length <= 0) {
+    if (latestPcmWindow48k.length <= 0 || latestCapturedSamples48k <= 0) {
       return null
     }
 
@@ -1324,7 +1492,7 @@ export function bootstrapApp(): void {
       SPECTROGRAM_WINDOW_SECONDS,
       slotCount,
     )
-    const windowSamples = Math.max(1, windowSnapshot.samples.length)
+    const windowSamples = Math.max(1, latestPcmWindow48k.length)
     const startSample = clamp(
       Math.floor((startSlot / slotCount) * windowSamples),
       0,
@@ -1335,33 +1503,31 @@ export function bootstrapApp(): void {
       startSample + 1,
       windowSamples,
     )
-    const samples = windowSnapshot.samples.subarray(startSample, endSample)
+    const samples = latestPcmWindow48k.subarray(startSample, endSample)
     if (samples.length <= 0) {
       return null
     }
 
     return {
       samples,
-      sampleRateHz: windowSnapshot.sampleRateHz,
+      sampleRateHz: timelineSyncState.sampleRateHz,
       startSample,
       endSample,
     }
   }
 
   const hasSavableAudioData = (): boolean => {
-    const captureMetrics = audioEngine.getCaptureMetrics()
-    return (
-      (captureMetrics.sampleRateHz ?? 0) > 0 &&
-      captureMetrics.windowSamples > 0 &&
-      captureMetrics.capturedSamplesTotal > 0
-    )
+    return timelineSyncState.sampleRateHz > 0 && latestPcmWindow48k.length > 0 && latestCapturedSamples48k > 0
   }
 
   const stopPlayback = async (): Promise<void> => {
+    stopPlaybackProgressLoop()
     const activeSource = playbackSourceNode
     const activeContext = playbackContext
     playbackSourceNode = null
     playbackContext = null
+    playbackStartTimeSec = 0
+    playbackDurationSec = 0
 
     if (activeSource) {
       activeSource.onended = null
@@ -1411,6 +1577,9 @@ export function bootstrapApp(): void {
 
     playbackContext = context
     playbackSourceNode = sourceNode
+    playbackStartTimeSec = context.currentTime
+    playbackDurationSec = buffer.duration
+    setPlaybackProgressUi(0, playbackDurationSec)
     sourceNode.onended = () => {
       if (playbackSourceNode !== sourceNode) {
         return
@@ -1424,6 +1593,7 @@ export function bootstrapApp(): void {
     })
 
     sourceNode.start()
+    startPlaybackProgressLoop()
   }
 
   const saveDisplayedAudio = async (): Promise<void> => {
@@ -1469,69 +1639,36 @@ export function bootstrapApp(): void {
     }
   }
 
-  const rebuildHistoryFromSnapshot = (snapshot: WindowPcmSnapshot, state: AppState): void => {
-    if (snapshot.samples.length <= 0) {
-      return
-    }
-
-    const frameSize = state.analysisFrameSize
-    const hopSamples = Math.max(
-      1,
-      Math.round(state.analysisFrameSize * (1 - state.analysisOverlapPercent / 100)),
-    )
-    const transformer = createStftTransformer({ frameSize })
-    const bins = transformer.frequencyBinCount
-    if (bins <= 0) {
-      return
-    }
-
-    const capacity = Math.max(1, getHistoryCapacity())
-    const nextRing = initializeHistoryWithSilence(capacity, bins, SILENCE_DECIBELS)
-    const windowSamples = snapshot.samples
-    const safeWindowLength = Math.max(1, windowSamples.length)
-    const maxFrameIndex = Math.max(0, Math.ceil((safeWindowLength - 1) / hopSamples))
-    const frameBuffer = new Float32Array(frameSize)
-    const spectrumCache = new Map<number, Float32Array>()
-
-    const getSpectrumForFrameIndex = (frameIndex: number): Float32Array => {
-      const cached = spectrumCache.get(frameIndex)
-      if (cached) {
-        return cached
-      }
-
-      const frameStart = frameIndex * hopSamples
-      frameBuffer.fill(0)
-      if (frameStart < windowSamples.length) {
-        const frameEnd = Math.min(windowSamples.length, frameStart + frameSize)
-        frameBuffer.set(windowSamples.subarray(frameStart, frameEnd), 0)
-      }
-
-      const transformed = transformer.transform(frameBuffer)
-      const copied = new Float32Array(transformed.length)
-      copied.set(transformed)
-      spectrumCache.set(frameIndex, copied)
-      return copied
-    }
-
-    for (let columnIndex = 0; columnIndex < capacity; columnIndex += 1) {
-      const ratio = capacity > 1 ? columnIndex / (capacity - 1) : 0
-      const samplePosition = ratio * (safeWindowLength - 1)
-      const frameIndex = clamp(Math.floor(samplePosition / hopSamples), 0, maxFrameIndex)
-      const spectrum = getSpectrumForFrameIndex(frameIndex)
-      nextRing.data.set(spectrum, columnIndex * bins)
-    }
-
-    frequencyHistoryRing = nextRing
-    historyLinearBuffer = new Float32Array(0)
+  const applySnapshot = (snapshot: AnalysisSnapshot): void => {
+    latestPcmWindow48k = snapshot.pcmWindow48k
+    latestCapturedSamples48k = snapshot.capturedSamples48k
+    timelineSyncState.sampleRateHz = snapshot.sampleRateHz
+    timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
+    timelineSyncState.capturedSamples = snapshot.capturedSamples48k
+    setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
   }
 
   const stopVisualization = async (): Promise<void> => {
-    const stateBeforeStop = stateStore.getState()
-    const snapshotBeforeStop = stateBeforeStop.isRecording ? audioEngine.getWindowPcmSnapshot() : null
+    if (!stateStore.getState().isRecording) {
+      if (captureChunkUnsubscribe) {
+        captureChunkUnsubscribe()
+        captureChunkUnsubscribe = null
+      }
+      return
+    }
 
     if (frameId !== null) {
       cancelAnimationFrame(frameId)
       frameId = null
+    }
+
+    try {
+      const captureSnapshot = await audioEngine.requestWindowSnapshot()
+      if (captureSnapshot) {
+        // Triggered to flush pending worklet buffers into engine-side metrics.
+      }
+    } catch {
+      // Ignore snapshot fetch errors and proceed to finalize worker data.
     }
 
     try {
@@ -1542,6 +1679,21 @@ export function bootstrapApp(): void {
       })
     }
 
+    if (captureChunkUnsubscribe) {
+      captureChunkUnsubscribe()
+      captureChunkUnsubscribe = null
+    }
+
+    try {
+      const finalizedSnapshot = await analysisService.stopAndFinalize()
+      applySnapshot(finalizedSnapshot)
+    } catch (error) {
+      conservativeMode = true
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, '停止後の再解析に失敗しました。'),
+      })
+    }
+
     stateStore.setState({
       isRecording: false,
       audioReady: false,
@@ -1549,50 +1701,36 @@ export function bootstrapApp(): void {
 
     lastAnimationTimestamp = null
     resetAnalysisBuffers()
-
-    if (snapshotBeforeStop) {
-      try {
-        rebuildHistoryFromSnapshot(snapshotBeforeStop, stateBeforeStop)
-        renderHistoryFromBuffer()
-      } catch (error) {
-        stateStore.setState({
-          errorMessage: toErrorMessage(error, '停止後の再解析に失敗しました。'),
-        })
-      }
-    }
+    requestHistoryRender()
   }
 
-  const configureAnalysisScheduler = (state: AppState): void => {
-    const sampleRateHz = audioEngine.getSampleRateHz()
-    if (!sampleRateHz || sampleRateHz <= 0) {
-      activeSampleRateHz = 0
-      activeHopSamples = 1
-      analysisAccumulatorSamples = 0
-      return
+  const clearAllRecordedData = async (): Promise<void> => {
+    if (stateStore.getState().isRecording) {
+      await stopVisualization()
     }
-
-    const qualityProfile = getActiveQualityProfile()
-    const requestedHopSamples = Math.max(
-      1,
-      Math.round(state.analysisFrameSize * (1 - state.analysisOverlapPercent / 100)),
-    )
-    const performanceGuardHopSamples = Math.max(1, Math.ceil(sampleRateHz / Math.max(1, qualityProfile.analysisHz)))
-    activeSampleRateHz = sampleRateHz
-    activeHopSamples = Math.max(requestedHopSamples, performanceGuardHopSamples)
-    analysisAccumulatorSamples = 0
+    await stopPlayback()
+    if (captureChunkUnsubscribe) {
+      captureChunkUnsubscribe()
+      captureChunkUnsubscribe = null
+    }
+    audioEngine.clearCapturedData()
+    analysisService.clear()
+    latestPcmWindow48k = new Float32Array(0)
+    latestCapturedSamples48k = 0
+    timelineSyncState.capturedSamples = 0
+    resetFrequencyHistory()
+    resetAnalysisBuffers()
+    renderer.clear()
+    stateStore.setState({ errorMessage: null })
   }
 
-  const applyQualityProfile = (reconfigureAnalysis: boolean, redrawHistory: boolean): void => {
+  const applyQualityProfile = (_reconfigureAnalysis: boolean, redrawHistory: boolean): void => {
     const qualityProfile = getActiveQualityProfile()
     elements.canvas.dataset.dprCap = String(qualityProfile.dprCap)
     applyRendererLayout()
 
-    if (reconfigureAnalysis) {
-      configureAnalysisScheduler(stateStore.getState())
-    }
-
     if (redrawHistory) {
-      renderHistoryFromBuffer()
+      requestHistoryRender()
     }
   }
 
@@ -1638,15 +1776,6 @@ export function bootstrapApp(): void {
     applyQualityProfile(true, true)
   }
 
-  const analyzeCurrentFrame = (): Float32Array => {
-    if (!stftTransformer) {
-      return new Float32Array(0)
-    }
-
-    const timeDomainData = audioEngine.getTimeDomainData()
-    return stftTransformer.transform(timeDomainData)
-  }
-
   const renderProjectedColumn = (state: AppState, rawFrequencyData: Float32Array): void => {
     appendHistoryColumn(rawFrequencyData)
 
@@ -1654,11 +1783,11 @@ export function bootstrapApp(): void {
     const selectedTimeSpan = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
     const usesTimeZoom = selectedTimeSpan < fullTimeSpan - 1e-6
     if (usesTimeZoom) {
-      renderHistoryFromBuffer()
+      requestHistoryRender()
       return
     }
 
-    const nyquistHz = audioEngine.getMaxFrequencyHz() ?? state.frequencyDomainMaxHz
+    const nyquistHz = Math.max(state.frequencyDomainMaxHz, timelineSyncState.sampleRateHz / 2)
     const projectedFrequencyData = projectFrequencyRange(
       rawFrequencyData,
       state.frequencyMinHz,
@@ -1684,70 +1813,10 @@ export function bootstrapApp(): void {
     lastAnimationTimestamp = timestamp
     updateQualityStageFromPerformance(deltaMs)
 
-    analysisAccumulatorSamples += deltaSeconds * activeSampleRateHz
     renderGateAccumulatorSeconds += deltaSeconds
 
     const qualityProfile = getActiveQualityProfile()
-    const maxAnalysisBacklogSamples = activeHopSamples * MAX_ANALYSIS_BACKLOG_HOPS
-    if (analysisAccumulatorSamples > maxAnalysisBacklogSamples) {
-      analysisAccumulatorSamples = maxAnalysisBacklogSamples
-    }
-
-    let analysisSteps = 0
-    while (
-      analysisAccumulatorSamples >= activeHopSamples &&
-      analysisSteps < qualityProfile.maxAnalysisStepsPerFrame
-    ) {
-      const rawFrequencyData = analyzeCurrentFrame()
-      mergeAnalysisFrame(rawFrequencyData)
-      analysisAccumulatorSamples -= activeHopSamples
-      analysisSteps += 1
-    }
-
-    const captureMetrics = audioEngine.getCaptureMetrics()
-    if (
-      captureMetrics.sampleRateHz &&
-      timelineSyncState.sampleRateHz > 0 &&
-      Math.abs(captureMetrics.sampleRateHz - timelineSyncState.sampleRateHz) > 1e-6
-    ) {
-      if (frequencyHistoryRing.bins > 0) {
-        frequencyHistoryRing = initializeHistoryWithSilence(
-          Math.max(1, getHistoryCapacity()),
-          frequencyHistoryRing.bins,
-          SILENCE_DECIBELS,
-        )
-        historyLinearBuffer = new Float32Array(0)
-        renderHistoryFromBuffer()
-      }
-      syncTimelineState({ resetCursor: true })
-    }
-
-    const currentPlotWidth = Math.max(1, getHistoryCapacity())
-    if (timelineSyncState.plotWidth !== currentPlotWidth || timelineSyncState.windowSamples <= 0) {
-      syncTimelineState({ resetCursor: true })
-    }
-
-    const samplesPerColumn = Math.max(1 / Math.max(1, timelineSyncState.plotWidth), timelineSyncState.samplesPerColumn)
-    const targetColumnsPerSecond = currentPlotWidth / SPECTROGRAM_WINDOW_SECONDS
-    const minimumColumnsPerFrame = Math.max(
-      1,
-      Math.ceil(targetColumnsPerSecond / Math.max(1, qualityProfile.renderFps)),
-    )
-    const baselineMaxColumnsPerFrame = Math.max(qualityProfile.maxColumnsPerFrame, minimumColumnsPerFrame + 1)
-    const sampleBacklog = captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample
-    const columnsDueBeforeClamp = Math.floor(sampleBacklog / samplesPerColumn)
-    const maxColumnsPerFrame = clamp(
-      Math.max(baselineMaxColumnsPerFrame, columnsDueBeforeClamp),
-      baselineMaxColumnsPerFrame,
-      MAX_DYNAMIC_COLUMNS_PER_FRAME,
-    )
-    const maxColumnBacklogSamples = Math.max(
-      samplesPerColumn * maxColumnsPerFrame * MAX_COLUMN_BACKLOG_FACTOR,
-      (timelineSyncState.sampleRateHz || activeSampleRateHz || 0) * SPECTROGRAM_WINDOW_SECONDS,
-    )
-    if (maxColumnBacklogSamples > 0 && sampleBacklog > maxColumnBacklogSamples) {
-      timelineSyncState.columnCursorSample = captureMetrics.capturedSamplesTotal - maxColumnBacklogSamples
-    }
+    const maxColumnsPerFrame = Math.max(1, qualityProfile.maxColumnsPerFrame * 4)
 
     const renderIntervalSeconds = 1 / Math.max(1, qualityProfile.renderFps)
     if (renderGateAccumulatorSeconds < renderIntervalSeconds) {
@@ -1758,19 +1827,13 @@ export function bootstrapApp(): void {
     renderGateAccumulatorSeconds %= renderIntervalSeconds
 
     let columnsDrawn = 0
-    let columnsDue = Math.floor(
-      (captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample) / samplesPerColumn,
-    )
-    while (columnsDue > 0 && columnsDrawn < maxColumnsPerFrame) {
+    while (columnsDrawn < maxColumnsPerFrame) {
       const columnData = consumeColumnData()
-      if (columnData) {
-        renderProjectedColumn(state, columnData)
+      if (!columnData) {
+        break
       }
-      timelineSyncState.columnCursorSample += samplesPerColumn
+      renderProjectedColumn(state, columnData)
       columnsDrawn += 1
-      columnsDue = Math.floor(
-        (captureMetrics.capturedSamplesTotal - timelineSyncState.columnCursorSample) / samplesPerColumn,
-      )
     }
 
     frameId = requestAnimationFrame(drawFrame)
@@ -1804,8 +1867,10 @@ export function bootstrapApp(): void {
       applyQualityProfile(false, false)
     }
 
+    const hasSavableAudio = hasSavableAudioData()
     renderAuthView(elements, state, authService.isEnabled)
-    renderControlsView(elements, state, hasSavableAudioData())
+    renderControlsView(elements, state, hasSavableAudio)
+    renderPlaybackWidget(state, hasSavableAudio)
     renderAnalysisControls(state)
     renderFrequencyControls(state)
     renderDecibelControls(state)
@@ -1819,7 +1884,7 @@ export function bootstrapApp(): void {
       lastRenderedDecibelMin !== state.decibelMin || lastRenderedDecibelMax !== state.decibelMax
     const timeRangeChanged = lastRenderedTimeMinSec !== state.timeMinSec || lastRenderedTimeMaxSec !== state.timeMaxSec
     if (frequencyRangeChanged || decibelRangeChanged || timeRangeChanged) {
-      renderHistoryFromBuffer()
+      requestHistoryRender()
       lastRenderedRangeMinHz = state.frequencyMinHz
       lastRenderedRangeMaxHz = state.frequencyMaxHz
       lastRenderedDecibelMin = state.decibelMin
@@ -1875,6 +1940,13 @@ export function bootstrapApp(): void {
     }
 
     stateStore.setState({ analysisFrameSize: parsedFrameSize })
+    const refreshedState = stateStore.getState()
+    analysisService.start({
+      frameSize: refreshedState.analysisFrameSize,
+      overlapPercent: refreshedState.analysisOverlapPercent,
+      plotWidth: Math.max(1, getHistoryCapacity()),
+    })
+    void syncHistoryFromWorker()
   })
 
   elements.upperFrequencySelect.addEventListener('change', () => {
@@ -1961,7 +2033,7 @@ export function bootstrapApp(): void {
 
   const beginFrequencySliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
+    if (state.authStatus !== 'signed-in' || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -2025,7 +2097,7 @@ export function bootstrapApp(): void {
 
   const beginDecibelSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
+    if (state.authStatus !== 'signed-in' || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -2089,7 +2161,7 @@ export function bootstrapApp(): void {
 
   const beginTimeSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in' || state.isPlayingBack) {
+    if (state.authStatus !== 'signed-in' || state.isPlayingBack || state.isRecording || conservativeMode) {
       return
     }
 
@@ -2127,7 +2199,7 @@ export function bootstrapApp(): void {
     }
 
     const state = stateStore.getState()
-    if (state.isPlayingBack) {
+    if (state.isPlayingBack || state.isRecording || conservativeMode) {
       return
     }
     const rect = elements.timeSlider.getBoundingClientRect()
@@ -2165,39 +2237,49 @@ export function bootstrapApp(): void {
       return
     }
 
+    if (state.isRecording) {
+      await stopVisualization()
+      return
+    }
+
+    if (state.isPlayingBack) {
+      stateStore.setState({ errorMessage: '再生中です。Playボタンで停止してからRecordしてください。' })
+      return
+    }
+
     if (state.isSavingAudio) {
-      stateStore.setState({ errorMessage: '保存処理中です。完了後に再度開始してください。' })
+      stateStore.setState({ errorMessage: '保存処理中です。完了後に再度Recordしてください。' })
       return
     }
 
     try {
       await stopPlayback()
+      const currentPlotWidth = Math.max(1, getHistoryCapacity())
+      analysisService.start({
+        frameSize: state.analysisFrameSize,
+        overlapPercent: state.analysisOverlapPercent,
+        plotWidth: currentPlotWidth,
+      })
+      syncTimelineState()
+      if (captureChunkUnsubscribe) {
+        captureChunkUnsubscribe()
+      }
+      captureChunkUnsubscribe = audioEngine.subscribeCaptureChunk((chunk: CaptureChunk) => {
+        analysisService.pushCaptureChunk(chunk)
+      })
       await audioEngine.start({
         fftSize: state.analysisFrameSize,
         upperFrequencyHz: state.analysisUpperFrequencyHz,
       })
-      renderer.clear()
-      resetFrequencyHistory()
+      conservativeMode = false
       resetAnalysisBuffers()
       lastAnimationTimestamp = null
       activeQualityStageIndex = 0
       applyQualityProfile(false, false)
 
-      const nyquistFrequencyHz = audioEngine.getMaxFrequencyHz() ?? stateStore.getState().frequencyDomainMaxHz
+      const nyquistFrequencyHz = analysisService.getSampleRateHz() / 2
       const detectedMaxFrequencyHz = Math.min(nyquistFrequencyHz, state.analysisUpperFrequencyHz)
       setFrequencyDomainMax(detectedMaxFrequencyHz)
-      configureAnalysisScheduler(state)
-      syncTimelineState({ resetCursor: true })
-      stftTransformer = createStftTransformer({ frameSize: state.analysisFrameSize })
-      const initialFrame = analyzeCurrentFrame()
-      const initialBins =
-        initialFrame.length > 0 ? initialFrame.length : stftTransformer.frequencyBinCount
-      if (initialBins > 0) {
-        ensureHistoryRingLayout(getHistoryCapacity(), initialBins)
-        ensureSilenceColumn(initialBins)
-        renderHistoryFromBuffer()
-      }
-      mergeAnalysisFrame(initialFrame)
 
       stateStore.setState({
         isRecording: true,
@@ -2206,7 +2288,9 @@ export function bootstrapApp(): void {
       })
 
       frameId = requestAnimationFrame(drawFrame)
+      void syncHistoryFromWorker()
     } catch (error) {
+      conservativeMode = true
       stateStore.setState({
         errorMessage: isMicrophonePermissionError(error)
           ? 'マイク権限が拒否されました。ブラウザ設定を確認してください。'
@@ -2215,11 +2299,37 @@ export function bootstrapApp(): void {
         hasMicPermission: false,
         audioReady: false,
       })
+      if (captureChunkUnsubscribe) {
+        captureChunkUnsubscribe()
+        captureChunkUnsubscribe = null
+      }
       await audioEngine.stop().catch(() => undefined)
     }
   })
 
-  elements.playButton.addEventListener('click', async () => {
+  elements.clearButton.addEventListener('click', async () => {
+    stateStore.setState({ errorMessage: null })
+    const state = stateStore.getState()
+    if (state.authStatus !== 'signed-in') {
+      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+      return
+    }
+
+    if (state.isSavingAudio || state.isPlayingBack || state.isRecording) {
+      stateStore.setState({ errorMessage: '停止中にClearを実行してください。' })
+      return
+    }
+
+    try {
+      await clearAllRecordedData()
+    } catch (error) {
+      stateStore.setState({
+        errorMessage: toErrorMessage(error, 'データのクリアに失敗しました。'),
+      })
+    }
+  })
+
+  elements.playbackToggleButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
@@ -2234,6 +2344,10 @@ export function bootstrapApp(): void {
     }
 
     try {
+      if (state.isPlayingBack) {
+        await stopPlayback()
+        return
+      }
       await startPlayback()
     } catch (error) {
       await stopPlayback()
@@ -2268,16 +2382,6 @@ export function bootstrapApp(): void {
       stateStore.setState({
         errorMessage: toErrorMessage(error, '音声ファイルの保存に失敗しました。'),
       })
-    }
-  })
-
-  elements.stopButton.addEventListener('click', async () => {
-    const state = stateStore.getState()
-    if (state.isRecording) {
-      await stopVisualization()
-    }
-    if (state.isPlayingBack) {
-      await stopPlayback()
     }
   })
 
@@ -2324,6 +2428,14 @@ export function bootstrapApp(): void {
     if (authUnsubscribe) {
       authUnsubscribe()
     }
+    if (analysisColumnsUnsubscribe) {
+      analysisColumnsUnsubscribe()
+      analysisColumnsUnsubscribe = null
+    }
+    if (captureChunkUnsubscribe) {
+      captureChunkUnsubscribe()
+      captureChunkUnsubscribe = null
+    }
 
     if (resizeObserver) {
       resizeObserver.disconnect()
@@ -2331,6 +2443,7 @@ export function bootstrapApp(): void {
 
     void stopVisualization()
     void stopPlayback()
+    analysisService.dispose()
   })
 
   let resizeRafId: number | null = null
@@ -2341,7 +2454,7 @@ export function bootstrapApp(): void {
 
     resizeRafId = requestAnimationFrame(() => {
       applyQualityProfile(false, false)
-      renderHistoryFromBuffer()
+      requestHistoryRender()
       resizeRafId = null
     })
   }
@@ -2371,9 +2484,7 @@ export function bootstrapApp(): void {
       }
 
       lastAnimationTimestamp = null
-      analysisAccumulatorSamples = 0
       renderGateAccumulatorSeconds = 0
-      timelineSyncState.columnCursorSample = audioEngine.getCaptureMetrics().capturedSamplesTotal
       return
     }
 

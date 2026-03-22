@@ -14,45 +14,28 @@
       </section>
 
       <section id="app-page" class="app-page" hidden>
-        <section class="panel control-panel">
-          <div class="control-info">
-            <p class="panel-title">マイク解析</p>
-            <p id="mic-status" class="status">開始ボタンを押すとマイク許可を要求します。</p>
-            <div class="analysis-settings">
-              <label class="analysis-field" for="frame-size-select">
-                <span>Frame size</span>
-                <select id="frame-size-select">
-                  <option value="512">512</option>
-                  <option value="1024">1024</option>
-                  <option value="2048">2048</option>
-                  <option value="4096">4096</option>
-                  <option value="8192">8192</option>
-                </select>
-              </label>
-              <label class="analysis-field" for="overlap-input">
-                <span>Overlap [%]</span>
-                <input id="overlap-input" type="number" min="0" max="99" step="1" inputmode="numeric" />
-              </label>
-              <label class="analysis-field" for="upper-frequency-select">
-                <span>Upper [Hz]</span>
-                <select id="upper-frequency-select">
-                  <option value="5000">5000</option>
-                  <option value="10000">10000</option>
-                  <option value="20000">20000</option>
-                </select>
-              </label>
-            </div>
-          </div>
-          <div class="button-row">
-            <button id="start-button" class="btn btn-accent" type="button">マイク開始</button>
-            <button id="play-button" class="btn" type="button">表示範囲を再生</button>
-            <button id="save-button" class="btn" type="button">表示範囲を保存</button>
-            <button id="stop-button" class="btn" type="button">停止</button>
-          </div>
-        </section>
+        <h1 class="login-title app-title">SpectLab</h1>
 
         <section class="panel canvas-panel">
           <div class="y-axis-area">
+            <div class="graph-action-widget">
+              <button id="start-button" class="btn btn-accent graph-action-button record-toggle-button" type="button" aria-label="Start recording">
+                <span class="record-toggle-icons" aria-hidden="true">
+                  <span id="record-action-icon" class="action-icon action-icon-record"></span>
+                  <span id="record-stop-action-icon" class="action-icon action-icon-record-stop"></span>
+                </span>
+                <span class="action-label action-label-record">Record</span>
+                <span class="action-label action-label-stop">Stop</span>
+              </button>
+              <button id="clear-button" class="btn graph-action-button" type="button">
+                <span id="clear-action-icon" class="action-icon" aria-hidden="true"></span>
+                <span class="action-label">Clear</span>
+              </button>
+              <button id="save-button" class="btn graph-action-button" type="button">
+                <span id="save-action-icon" class="action-icon" aria-hidden="true"></span>
+                <span class="action-label">Save Audio</span>
+              </button>
+            </div>
             <div class="chart-layout">
               <div id="freq-slider-column" class="y-range-row">
                 <div id="freq-slider" class="freq-slider" aria-label="周波数レンジスライダ">
@@ -121,6 +104,28 @@
                 </div>
               </div>
             </div>
+            <div class="playback-widget">
+              <button id="playback-toggle-button" class="btn playback-toggle-button" type="button" aria-label="Play visible range">
+                <span class="playback-toggle-icons" aria-hidden="true">
+                  <span id="playback-icon-play" class="playback-icon playback-icon-play"></span>
+                  <span id="playback-icon-stop" class="playback-icon playback-icon-stop"></span>
+                </span>
+                <span class="playback-toggle-text playback-toggle-text-play">Play</span>
+                <span class="playback-toggle-text playback-toggle-text-stop">Stop</span>
+              </button>
+              <div
+                id="playback-progress-track"
+                class="playback-progress-track"
+                role="progressbar"
+                aria-label="再生進捗"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+              >
+                <div id="playback-progress-fill" class="playback-progress-fill"></div>
+              </div>
+              <div id="playback-time-label" class="playback-time-label">00:00 / 00:00</div>
+            </div>
             <div class="range-controls">
               <label class="range-field" for="freq-min-input">
                 <span>Freq.Min</span>
@@ -147,6 +152,34 @@
                 <input id="time-max-input" type="number" step="0.1" inputmode="decimal" />
               </label>
             </div>
+          </div>
+        </section>
+
+        <section class="panel analysis-settings-panel">
+          <p id="mic-status" class="status" hidden></p>
+          <div class="analysis-settings">
+            <label class="analysis-field" for="frame-size-select">
+              <span>Frame size</span>
+              <select id="frame-size-select">
+                <option value="512">512</option>
+                <option value="1024">1024</option>
+                <option value="2048">2048</option>
+                <option value="4096">4096</option>
+                <option value="8192">8192</option>
+              </select>
+            </label>
+            <label class="analysis-field" for="overlap-input">
+              <span>Overlap [%]</span>
+              <input id="overlap-input" type="number" min="0" max="99" step="1" inputmode="numeric" />
+            </label>
+            <label class="analysis-field" for="upper-frequency-select">
+              <span>Upper [Hz]</span>
+              <select id="upper-frequency-select">
+                <option value="5000">5000</option>
+                <option value="10000">10000</option>
+                <option value="20000">20000</option>
+              </select>
+            </label>
           </div>
         </section>
 
