@@ -5,6 +5,7 @@ export interface UIElements {
   loginButton: HTMLButtonElement
   logoutButton: HTMLButtonElement
   micStatus: HTMLParagraphElement
+  analysisMetrics: HTMLParagraphElement
   startButton: HTMLButtonElement
   recordActionIcon: HTMLSpanElement
   recordStopActionIcon: HTMLSpanElement
@@ -42,6 +43,9 @@ export interface UIElements {
   timeMaxInput: HTMLInputElement
   dbTicks: HTMLDivElement
   canvas: HTMLCanvasElement
+  fftCanvas: HTMLCanvasElement
+  fftAverageToggleButton: HTMLButtonElement
+  fftStatusLabel: HTMLParagraphElement
 }
 
 function getRequiredElement<T extends HTMLElement>(
@@ -97,6 +101,7 @@ export function getUIElements(): UIElements {
     loginButton: getRequiredElement<HTMLButtonElement>('login-button', 'button'),
     logoutButton: getRequiredElement<HTMLButtonElement>('logout-button', 'button'),
     micStatus: getRequiredElement<HTMLParagraphElement>('mic-status', 'paragraph'),
+    analysisMetrics: getRequiredElement<HTMLParagraphElement>('analysis-metrics', 'paragraph'),
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),
     recordActionIcon: getRequiredElement<HTMLSpanElement>('record-action-icon', 'span'),
     recordStopActionIcon: getRequiredElement<HTMLSpanElement>('record-stop-action-icon', 'span'),
@@ -134,5 +139,8 @@ export function getUIElements(): UIElements {
     timeMaxInput: getRequiredElement<HTMLInputElement>('time-max-input', 'input'),
     dbTicks: getRequiredElement<HTMLDivElement>('db-ticks', 'div'),
     canvas: getRequiredElement<HTMLCanvasElement>('spectrogram-canvas', 'canvas'),
+    fftCanvas: getRequiredElement<HTMLCanvasElement>('fft-canvas', 'canvas'),
+    fftAverageToggleButton: getRequiredElement<HTMLButtonElement>('fft-average-toggle-button', 'button'),
+    fftStatusLabel: getRequiredElement<HTMLParagraphElement>('fft-status-label', 'paragraph'),
   }
 }

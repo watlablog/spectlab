@@ -3,7 +3,13 @@ export async function requestMicrophoneStream(): Promise<MediaStream> {
     throw new Error('This browser does not support microphone input.')
   }
 
-  return navigator.mediaDevices.getUserMedia({ audio: true })
+  return navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+    },
+  })
 }
 
 export function stopMicrophoneStream(stream: MediaStream | null): void {

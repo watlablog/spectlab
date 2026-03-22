@@ -7,7 +7,11 @@ const BACKGROUND_COLOR = 'rgb(2 7 16)'
 const AXIS_COLOR = 'rgb(156 189 236)'
 const GRID_COLOR = 'rgb(80 110 150 / 26%)'
 const LABEL_COLOR = 'rgb(166 189 220)'
+const CURSOR_SINGLE_COLOR = 'rgb(255 214 92)'
+const CURSOR_MIN_COLOR = 'rgb(255 165 102)'
+const CURSOR_MAX_COLOR = 'rgb(128 226 255)'
 const TICK_SIZE_PX = 6
+const SPECTROGRAM_VERTICAL_SMOOTH_ALPHA = 0.42
 
 const DESKTOP_MARGINS = {
   left: 64,
@@ -51,11 +55,19 @@ export interface AxisRenderConfig {
   yTickCount: number
 }
 
+export interface CursorOverlayConfig {
+  mode: 'single' | 'average'
+  singleSec: number
+  rangeMinSec: number
+  rangeMaxSec: number
+}
+
 export interface Renderer {
   init(canvas: HTMLCanvasElement): void
   resizeForContainer(): PlotMetrics
   drawColumn(freq: Float32Array, minDecibels: number, maxDecibels: number): void
   composeAxes(config: AxisRenderConfig): void
+  setCursorOverlay(config: CursorOverlayConfig | null): void
   redrawHistory(history: Float32Array, count: number, bins: number, minDecibels: number, maxDecibels: number): void
   getPlotMetrics(): PlotMetrics
   clear(): void
@@ -63,6 +75,40 @@ export interface Renderer {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+function sampleInterpolatedValue(data: Float32Array, position: number, fallback: number): number {
+  if (data.length <= 0) {
+    return fallback
+  }
+
+  const safePosition = clamp(position, 0, Math.max(data.length - 1, 0))
+  const lowerIndex = Math.floor(safePosition)
+  const upperIndex = Math.min(data.length - 1, lowerIndex + 1)
+  const blend = safePosition - lowerIndex
+  const lowerValue = data[lowerIndex] ?? fallback
+  const upperValue = data[upperIndex] ?? lowerValue
+  return lowerValue + (upperValue - lowerValue) * blend
+}
+
+function sampleInterpolatedOffsetValue(
+  data: Float32Array,
+  offset: number,
+  length: number,
+  position: number,
+  fallback: number,
+): number {
+  if (length <= 0) {
+    return fallback
+  }
+
+  const safePosition = clamp(position, 0, Math.max(length - 1, 0))
+  const lowerIndex = Math.floor(safePosition)
+  const upperIndex = Math.min(length - 1, lowerIndex + 1)
+  const blend = safePosition - lowerIndex
+  const lowerValue = data[offset + lowerIndex] ?? fallback
+  const upperValue = data[offset + upperIndex] ?? lowerValue
+  return lowerValue + (upperValue - lowerValue) * blend
 }
 
 function isMobileViewport(): boolean {
@@ -92,6 +138,7 @@ class SpectrogramRenderer implements Renderer {
     ...DEFAULT_AXIS_CONFIG,
     xTicksSec: [...DEFAULT_AXIS_CONFIG.xTicksSec],
   }
+  private cursorOverlay: CursorOverlayConfig | null = null
   private columnImageData: ImageData | null = null
   private readonly numberFormatter = new Intl.NumberFormat('en-US')
 
@@ -198,9 +245,12 @@ class SpectrogramRenderer implements Renderer {
     const imageData = this.ensureColumnImageData(plotHeight)
     const pixels = imageData.data
 
+    let smoothedSample = sampleInterpolatedValue(freq, freq.length - 1, minDecibels)
     for (let y = 0; y < plotHeight; y += 1) {
-      const binIndex = Math.floor(((plotHeight - 1 - y) / Math.max(plotHeight - 1, 1)) * (freq.length - 1))
-      const [red, green, blue] = amplitudeToRgb(freq[binIndex] ?? minDecibels, minDecibels, maxDecibels)
+      const binPosition = ((plotHeight - 1 - y) / Math.max(plotHeight - 1, 1)) * (freq.length - 1)
+      const sample = sampleInterpolatedValue(freq, binPosition, minDecibels)
+      smoothedSample += (sample - smoothedSample) * SPECTROGRAM_VERTICAL_SMOOTH_ALPHA
+      const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels)
       const offset = y * 4
       pixels[offset] = red
       pixels[offset + 1] = green
@@ -226,6 +276,11 @@ class SpectrogramRenderer implements Renderer {
     this.renderComposite()
   }
 
+  setCursorOverlay(config: CursorOverlayConfig | null): void {
+    this.cursorOverlay = config
+    this.renderComposite()
+  }
+
   redrawHistory(history: Float32Array, count: number, bins: number, minDecibels: number, maxDecibels: number): void {
     if (!this.spectrogramCtx) {
       return
@@ -246,14 +301,21 @@ class SpectrogramRenderer implements Renderer {
     const pixels = imageData.data
 
     for (let x = 0; x < plotWidth; x += 1) {
-      const sourceIndex =
-        count <= 1 ? 0 : Math.floor((x / Math.max(plotWidth - 1, 1)) * (count - 1))
-      const historyOffset = sourceIndex * bins
+      const sourcePosition = count <= 1 ? 0 : (x / Math.max(plotWidth - 1, 1)) * (count - 1)
+      const sourceIndexLow = Math.floor(sourcePosition)
+      const sourceIndexHigh = Math.min(count - 1, sourceIndexLow + 1)
+      const sourceBlend = sourcePosition - sourceIndexLow
+      const historyOffsetLow = sourceIndexLow * bins
+      const historyOffsetHigh = sourceIndexHigh * bins
 
+      let smoothedSample = history[historyOffsetLow + bins - 1] ?? minDecibels
       for (let y = 0; y < plotHeight; y += 1) {
-        const binIndex = Math.floor(((plotHeight - 1 - y) / Math.max(plotHeight - 1, 1)) * (bins - 1))
-        const sample = history[historyOffset + binIndex] ?? minDecibels
-        const [red, green, blue] = amplitudeToRgb(sample, minDecibels, maxDecibels)
+        const binPosition = ((plotHeight - 1 - y) / Math.max(plotHeight - 1, 1)) * (bins - 1)
+        const lowSample = sampleInterpolatedOffsetValue(history, historyOffsetLow, bins, binPosition, minDecibels)
+        const highSample = sampleInterpolatedOffsetValue(history, historyOffsetHigh, bins, binPosition, minDecibels)
+        const sample = lowSample + (highSample - lowSample) * sourceBlend
+        smoothedSample += (sample - smoothedSample) * SPECTROGRAM_VERTICAL_SMOOTH_ALPHA
+        const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels)
         const pixelOffset = y * 4
         pixels[pixelOffset] = red
         pixels[pixelOffset + 1] = green
@@ -398,6 +460,41 @@ class SpectrogramRenderer implements Renderer {
     this.ctx.fillRect(0, 0, canvasWidth, canvasHeight)
     this.ctx.drawImage(this.spectrogramCanvas, plotX, plotY)
     this.ctx.drawImage(this.axesCanvas, 0, 0)
+    this.drawCursorOverlay()
+  }
+
+  private drawCursorOverlay(): void {
+    if (!this.ctx || !this.cursorOverlay) {
+      return
+    }
+    const ctx = this.ctx
+
+    const safeWindowSec = Math.max(0.1, this.axisConfig.timeWindowSec)
+    const visibleMinSec = this.axisConfig.timeLabelOffsetSec
+    const visibleMaxSec = visibleMinSec + safeWindowSec
+    const { plotX, plotY, plotWidth, plotHeight } = this.metrics
+
+    const drawLineAt = (seconds: number, color: string): void => {
+      if (seconds < visibleMinSec || seconds > visibleMaxSec) {
+        return
+      }
+      const ratio = clamp((seconds - visibleMinSec) / safeWindowSec, 0, 1)
+      const x = Math.round(plotX + ratio * plotWidth) + 0.5
+      ctx.strokeStyle = color
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(x, plotY + 0.5)
+      ctx.lineTo(x, plotY + plotHeight - 0.5)
+      ctx.stroke()
+    }
+
+    if (this.cursorOverlay.mode === 'single') {
+      drawLineAt(this.cursorOverlay.singleSec, CURSOR_SINGLE_COLOR)
+      return
+    }
+
+    drawLineAt(this.cursorOverlay.rangeMinSec, CURSOR_MIN_COLOR)
+    drawLineAt(this.cursorOverlay.rangeMaxSec, CURSOR_MAX_COLOR)
   }
 }
 

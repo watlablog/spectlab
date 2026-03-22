@@ -4,7 +4,12 @@ import { createAppStateStore } from './state'
 import { getFirebaseConfig } from '../firebase/config'
 import { createAuthService } from '../firebase/auth'
 import { initFirebase } from '../firebase/init'
-import { createRenderer, type AxisRenderConfig } from '../render/canvas'
+import {
+  createRenderer,
+  type AxisRenderConfig,
+  type CursorOverlayConfig,
+  type PlotMetrics,
+} from '../render/canvas'
 import { renderAuthView } from '../ui/authView'
 import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
@@ -50,6 +55,12 @@ const STAGE_DEGRADE_LEVEL2_FRAME_MS = 32
 const STAGE_DEGRADE_REQUIRED_FRAMES = 120
 const STAGE_UPGRADE_FRAME_MS = 18
 const STAGE_UPGRADE_REQUIRED_FRAMES = 300
+const FFT_PANEL_DOMAIN_MIN_HZ = 0
+const FFT_PANEL_TICK_COUNT = 6
+const FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC = 10
+const FFT_PROFILE_REFRESH_INTERVAL_MS = 50
+const CURSOR_HIT_TEST_PX = 10
+const FFT_RENDER_SMOOTH_ALPHA = 0.35
 
 interface QualityProfile {
   renderFps: number
@@ -120,6 +131,27 @@ interface DisplayedAudioSlice {
   sampleRateHz: number
   startSample: number
   endSample: number
+}
+
+type FftCursorMode = 'single' | 'average'
+type FftCursorDragHandle = 'single' | 'min' | 'max'
+
+interface FftCursorState {
+  mode: FftCursorMode
+  singleSec: number
+  rangeMinSec: number
+  rangeMaxSec: number
+  activeDragHandle: FftCursorDragHandle | null
+  activePointerId: number | null
+  lastFallbackNoticeKey: string | null
+}
+
+type FftComputationSource = 'frame' | 'average-frame' | 'slice-fallback'
+
+interface FftProfileState {
+  spectrumDb: Float32Array
+  source: FftComputationSource
+  updatedAtMs: number
 }
 
 function routeToPath(route: AppRoute): string {
@@ -449,6 +481,10 @@ export function bootstrapApp(): void {
   const analysisService = createAnalysisService()
   const renderer = createRenderer()
   renderer.init(elements.canvas)
+  const fftCanvasCtx = elements.fftCanvas.getContext('2d')
+  if (!fftCanvasCtx) {
+    throw new Error('Failed to initialize FFT canvas context.')
+  }
 
   let authUnsubscribe: (() => void) | null = null
   let captureChunkUnsubscribe: (() => void) | null = null
@@ -484,6 +520,9 @@ export function bootstrapApp(): void {
   let lastRenderedDecibelMax: number | null = null
   let lastRenderedTimeMinSec: number | null = null
   let lastRenderedTimeMaxSec: number | null = null
+  let lastRenderedFrameSize: FrameSize | null = null
+  let lastRenderedOverlapPercent: number | null = null
+  let lastRenderedUpperFrequencyHz: UpperFrequencyHz | null = null
   let activeQualityStageIndex = 0
   let frameTimeEmaMs = 1000 / DESKTOP_QUALITY_PROFILE.renderFps
   let aboveLevel1FrameCount = 0
@@ -502,6 +541,19 @@ export function bootstrapApp(): void {
   let playbackProgressRafId: number | null = null
   let playbackStartTimeSec = 0
   let playbackDurationSec = 0
+  let fftRefreshTimeoutId: number | null = null
+  let fftLastRefreshAtMs = 0
+  let fftProfileState: FftProfileState | null = null
+  let fftProfileAccumulator = new Float32Array(0)
+  const fftCursorState: FftCursorState = {
+    mode: 'single',
+    singleSec: FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC,
+    rangeMinSec: FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC,
+    rangeMaxSec: FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC,
+    activeDragHandle: null,
+    activePointerId: null,
+    lastFallbackNoticeKey: null,
+  }
   const axisConfig: AxisRenderConfig = {
     timeWindowSec: SPECTROGRAM_WINDOW_SECONDS,
     timeLabelOffsetSec: 0,
@@ -509,6 +561,378 @@ export function bootstrapApp(): void {
     frequencyMaxHz: DEFAULT_MAX_FREQUENCY_HZ,
     xTicksSec: [0, 2, 4, 6, 8, 10],
     yTickCount: FREQUENCY_TICK_COUNT,
+  }
+  const fftNumberFormatter = new Intl.NumberFormat('en-US')
+  let fftPendingAllowFallbackNotice = false
+
+  const getMinimumCursorRangeSec = (state: AppState): number => {
+    const sampleRateHz = Math.max(1, timelineSyncState.sampleRateHz)
+    return state.analysisFrameSize / sampleRateHz
+  }
+
+  const clampCursorSeconds = (seconds: number): number => {
+    return clamp(seconds, TIME_DOMAIN_MIN_SEC, TIME_DOMAIN_MAX_SEC)
+  }
+
+  const showFallbackNoticeIfNeeded = (minRangeSec: number, reasonKey: string, allowNotice: boolean): void => {
+    if (!allowNotice) {
+      return
+    }
+
+    const noticeKey = `${reasonKey}:${minRangeSec.toFixed(3)}`
+    if (fftCursorState.lastFallbackNoticeKey === noticeKey) {
+      return
+    }
+
+    fftCursorState.lastFallbackNoticeKey = noticeKey
+    window.alert(
+      `Selected range is shorter than one analysis frame. Using spectrogram-slice FFT.\nMinimum cursor range: ${minRangeSec.toFixed(
+        3,
+      )} s`,
+    )
+  }
+
+  const ensureAverageCursorRange = (
+    singleSec: number,
+    minimumRangeSec: number,
+  ): { minSec: number; maxSec: number; impossible: boolean } => {
+    const safeSingleSec = clampCursorSeconds(singleSec)
+    if (!Number.isFinite(minimumRangeSec) || minimumRangeSec > SPECTROGRAM_WINDOW_SECONDS) {
+      return {
+        minSec: safeSingleSec,
+        maxSec: safeSingleSec,
+        impossible: true,
+      }
+    }
+
+    const halfRangeSec = minimumRangeSec / 2
+    let minSec = safeSingleSec - halfRangeSec
+    let maxSec = safeSingleSec + halfRangeSec
+    if (minSec < TIME_DOMAIN_MIN_SEC) {
+      maxSec += TIME_DOMAIN_MIN_SEC - minSec
+      minSec = TIME_DOMAIN_MIN_SEC
+    }
+    if (maxSec > TIME_DOMAIN_MAX_SEC) {
+      minSec -= maxSec - TIME_DOMAIN_MAX_SEC
+      maxSec = TIME_DOMAIN_MAX_SEC
+    }
+    minSec = clampCursorSeconds(minSec)
+    maxSec = clampCursorSeconds(maxSec)
+    return {
+      minSec,
+      maxSec,
+      impossible: false,
+    }
+  }
+
+  const resolveTimelineIndexForAbsoluteSec = (seconds: number): number => {
+    const capacity = frequencyHistoryRing.capacity
+    if (capacity <= 1) {
+      return 0
+    }
+    const safeSec = clampCursorSeconds(seconds)
+    const ratio = safeSec / SPECTROGRAM_WINDOW_SECONDS
+    return clamp(Math.round(ratio * (capacity - 1)), 0, capacity - 1)
+  }
+
+  const withHistoryColumn = (timelineIndex: number, cb: (column: Float32Array) => void): void => {
+    if (frequencyHistoryRing.capacity <= 0 || frequencyHistoryRing.bins <= 0 || frequencyHistoryRing.data.length <= 0) {
+      return
+    }
+    const clampedIndex = clamp(timelineIndex, 0, frequencyHistoryRing.capacity - 1)
+    const ringIndex = (frequencyHistoryRing.head + clampedIndex) % frequencyHistoryRing.capacity
+    const offset = ringIndex * frequencyHistoryRing.bins
+    cb(frequencyHistoryRing.data.subarray(offset, offset + frequencyHistoryRing.bins))
+  }
+
+  const averageHistoryRange = (startIndex: number, endExclusive: number): Float32Array => {
+    const bins = frequencyHistoryRing.bins
+    if (bins <= 0 || frequencyHistoryRing.capacity <= 0) {
+      return new Float32Array(0)
+    }
+
+    if (fftProfileAccumulator.length !== bins) {
+      fftProfileAccumulator = new Float32Array(bins)
+    } else {
+      fftProfileAccumulator.fill(0)
+    }
+
+    const safeStart = clamp(startIndex, 0, frequencyHistoryRing.capacity - 1)
+    const safeEnd = clamp(endExclusive, safeStart + 1, frequencyHistoryRing.capacity)
+    const sampleCount = Math.max(1, safeEnd - safeStart)
+
+    for (let index = safeStart; index < safeEnd; index += 1) {
+      withHistoryColumn(index, (column) => {
+        for (let bin = 0; bin < bins; bin += 1) {
+          const current = fftProfileAccumulator[bin] ?? 0
+          fftProfileAccumulator[bin] = current + (column[bin] ?? SILENCE_DECIBELS)
+        }
+      })
+    }
+
+    const averaged = new Float32Array(bins)
+    for (let bin = 0; bin < bins; bin += 1) {
+      averaged[bin] = (fftProfileAccumulator[bin] ?? 0) / sampleCount
+    }
+    return averaged
+  }
+
+  const computeFftProfile = (state: AppState, allowFallbackNotice: boolean): FftProfileState | null => {
+    if (frequencyHistoryRing.capacity <= 0 || frequencyHistoryRing.bins <= 0 || frequencyHistoryRing.data.length <= 0) {
+      return null
+    }
+
+    if (fftCursorState.mode === 'single') {
+      const timelineIndex = resolveTimelineIndexForAbsoluteSec(fftCursorState.singleSec)
+      let spectrum = new Float32Array(frequencyHistoryRing.bins)
+      withHistoryColumn(timelineIndex, (column) => {
+        spectrum = new Float32Array(column)
+      })
+      fftCursorState.lastFallbackNoticeKey = null
+      return {
+        spectrumDb: spectrum,
+        source: 'frame',
+        updatedAtMs: performance.now(),
+      }
+    }
+
+    const minSec = Math.min(fftCursorState.rangeMinSec, fftCursorState.rangeMaxSec)
+    const maxSec = Math.max(fftCursorState.rangeMinSec, fftCursorState.rangeMaxSec)
+    const widthSec = Math.max(0, maxSec - minSec)
+    const minimumRangeSec = getMinimumCursorRangeSec(state)
+    const impossibleRange = minimumRangeSec > SPECTROGRAM_WINDOW_SECONDS
+    const useFallback = impossibleRange || widthSec < minimumRangeSec
+
+    if (useFallback) {
+      showFallbackNoticeIfNeeded(minimumRangeSec, impossibleRange ? 'impossible' : 'short-range', allowFallbackNotice)
+    } else {
+      fftCursorState.lastFallbackNoticeKey = null
+    }
+
+    if (widthSec <= 0) {
+      const centerSec = clampCursorSeconds((minSec + maxSec) / 2)
+      const timelineIndex = resolveTimelineIndexForAbsoluteSec(centerSec)
+      let spectrum = new Float32Array(frequencyHistoryRing.bins)
+      withHistoryColumn(timelineIndex, (column) => {
+        spectrum = new Float32Array(column)
+      })
+      return {
+        spectrumDb: spectrum,
+        source: 'slice-fallback',
+        updatedAtMs: performance.now(),
+      }
+    }
+
+    const { startSlot, endSlotExclusive } = resolveTimeRangeSlots(
+      minSec,
+      maxSec,
+      SPECTROGRAM_WINDOW_SECONDS,
+      frequencyHistoryRing.capacity,
+    )
+
+    return {
+      spectrumDb: averageHistoryRange(startSlot, endSlotExclusive),
+      source: useFallback ? 'slice-fallback' : 'average-frame',
+      updatedAtMs: performance.now(),
+    }
+  }
+
+  const resizeFftCanvas = (): PlotMetrics => {
+    const dprCap = isMobileViewport() ? 1.5 : 2
+    const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, dprCap))
+    const width = Math.max(1, Math.floor(elements.fftCanvas.clientWidth * dpr))
+    const height = Math.max(1, Math.floor(elements.fftCanvas.clientHeight * dpr))
+
+    if (elements.fftCanvas.width !== width || elements.fftCanvas.height !== height) {
+      elements.fftCanvas.width = width
+      elements.fftCanvas.height = height
+    }
+
+    const marginLeft = 52
+    const marginRight = 12
+    const marginTop = 10
+    const marginBottom = 30
+    return {
+      plotX: marginLeft,
+      plotY: marginTop,
+      plotWidth: Math.max(1, width - marginLeft - marginRight),
+      plotHeight: Math.max(1, height - marginTop - marginBottom),
+      canvasWidth: width,
+      canvasHeight: height,
+      dpr,
+    }
+  }
+
+  const renderFftPanel = (state: AppState): void => {
+    const metrics = resizeFftCanvas()
+    const { plotX, plotY, plotWidth, plotHeight, canvasWidth, canvasHeight } = metrics
+    const minDb = state.decibelMin
+    const maxDb = state.decibelMax
+    const nyquistHz = Math.max(1, timelineSyncState.sampleRateHz / 2)
+    const freqMinHz = clamp(state.frequencyMinHz, FFT_PANEL_DOMAIN_MIN_HZ, nyquistHz)
+    const freqMaxHz = clamp(state.frequencyMaxHz, freqMinHz + MIN_RANGE_GAP_HZ, nyquistHz)
+    const freqSpan = Math.max(MIN_RANGE_GAP_HZ, freqMaxHz - freqMinHz)
+    const dbSpan = Math.max(MIN_DECIBEL_GAP, maxDb - minDb)
+
+    fftCanvasCtx.fillStyle = 'rgb(2 8 18)'
+    fftCanvasCtx.fillRect(0, 0, canvasWidth, canvasHeight)
+
+    fftCanvasCtx.strokeStyle = 'rgba(156, 189, 236, 0.86)'
+    fftCanvasCtx.lineWidth = 1
+    fftCanvasCtx.strokeRect(plotX + 0.5, plotY + 0.5, plotWidth - 1, plotHeight - 1)
+
+    fftCanvasCtx.strokeStyle = 'rgba(120, 156, 203, 0.26)'
+    fftCanvasCtx.lineWidth = 1
+    for (let index = 0; index < FFT_PANEL_TICK_COUNT; index += 1) {
+      const ratio = index / Math.max(FFT_PANEL_TICK_COUNT - 1, 1)
+      const y = Math.round(plotY + ratio * plotHeight) + 0.5
+      fftCanvasCtx.beginPath()
+      fftCanvasCtx.moveTo(plotX + 0.5, y)
+      fftCanvasCtx.lineTo(plotX + plotWidth + 0.5, y)
+      fftCanvasCtx.stroke()
+    }
+
+    fftCanvasCtx.fillStyle = 'rgb(166 189 220)'
+    fftCanvasCtx.font = '11px "Avenir Next", "Yu Gothic", sans-serif'
+    fftCanvasCtx.textBaseline = 'middle'
+    fftCanvasCtx.textAlign = 'right'
+    for (let index = 0; index < FFT_PANEL_TICK_COUNT; index += 1) {
+      const ratio = index / Math.max(FFT_PANEL_TICK_COUNT - 1, 1)
+      const valueDb = maxDb - ratio * dbSpan
+      const y = Math.round(plotY + ratio * plotHeight)
+      fftCanvasCtx.fillText(String(Math.round(valueDb)), plotX - 6, y)
+    }
+
+    fftCanvasCtx.textBaseline = 'top'
+    for (let index = 0; index < FFT_PANEL_TICK_COUNT; index += 1) {
+      const ratio = index / Math.max(FFT_PANEL_TICK_COUNT - 1, 1)
+      const valueHz = Math.round(freqMinHz + ratio * freqSpan)
+      const x = Math.round(plotX + ratio * plotWidth)
+      if (index === 0) {
+        fftCanvasCtx.textAlign = 'left'
+      } else if (index === FFT_PANEL_TICK_COUNT - 1) {
+        fftCanvasCtx.textAlign = 'right'
+      } else {
+        fftCanvasCtx.textAlign = 'center'
+      }
+      fftCanvasCtx.fillText(fftNumberFormatter.format(valueHz), x, plotY + plotHeight + 6)
+    }
+
+    fftCanvasCtx.textAlign = 'right'
+    fftCanvasCtx.textBaseline = 'alphabetic'
+    fftCanvasCtx.fillText('Frequency [Hz]', plotX + plotWidth, canvasHeight - 4)
+    fftCanvasCtx.save()
+    fftCanvasCtx.translate(14, plotY + plotHeight / 2)
+    fftCanvasCtx.rotate(-Math.PI / 2)
+    fftCanvasCtx.textAlign = 'center'
+    fftCanvasCtx.fillText('Level [dB]', 0, 0)
+    fftCanvasCtx.restore()
+
+    if (!fftProfileState || fftProfileState.spectrumDb.length <= 0) {
+      fftCanvasCtx.textAlign = 'center'
+      fftCanvasCtx.textBaseline = 'middle'
+      fftCanvasCtx.fillText('No FFT data', plotX + plotWidth / 2, plotY + plotHeight / 2)
+      return
+    }
+
+    const spectrum = fftProfileState.spectrumDb
+    fftCanvasCtx.strokeStyle = 'rgb(108 214 255)'
+    fftCanvasCtx.lineWidth = 1.4
+    fftCanvasCtx.lineJoin = 'round'
+    fftCanvasCtx.lineCap = 'round'
+
+    const sampleSpectrumDb = (frequencyHz: number): number => {
+      if (spectrum.length <= 1) {
+        return spectrum[0] ?? minDb
+      }
+
+      const normalizedBin = clamp((frequencyHz / nyquistHz) * (spectrum.length - 1), 0, spectrum.length - 1)
+      const lowerBin = Math.floor(normalizedBin)
+      const upperBin = Math.min(spectrum.length - 1, lowerBin + 1)
+      const blend = normalizedBin - lowerBin
+      const lowerDb = spectrum[lowerBin] ?? minDb
+      const upperDb = spectrum[upperBin] ?? lowerDb
+      return lowerDb + (upperDb - lowerDb) * blend
+    }
+
+    fftCanvasCtx.beginPath()
+    let smoothedDb = sampleSpectrumDb(freqMinHz)
+    for (let x = 0; x < plotWidth; x += 1) {
+      const ratio = x / Math.max(plotWidth - 1, 1)
+      const freqHz = freqMinHz + ratio * freqSpan
+      const rawDb = sampleSpectrumDb(freqHz)
+      smoothedDb += (rawDb - smoothedDb) * FFT_RENDER_SMOOTH_ALPHA
+      const yRatio = clamp((maxDb - smoothedDb) / dbSpan, 0, 1)
+      const y = plotY + yRatio * plotHeight
+      const canvasX = plotX + x
+      if (x === 0) {
+        fftCanvasCtx.moveTo(canvasX, y)
+      } else {
+        fftCanvasCtx.lineTo(canvasX, y)
+      }
+    }
+    fftCanvasCtx.stroke()
+  }
+
+  const updateCursorOverlay = (state: AppState): void => {
+    const overlayConfig: CursorOverlayConfig = {
+      mode: fftCursorState.mode,
+      singleSec: fftCursorState.singleSec,
+      rangeMinSec: fftCursorState.rangeMinSec,
+      rangeMaxSec: fftCursorState.rangeMaxSec,
+    }
+    renderer.setCursorOverlay(overlayConfig)
+
+    if (fftCursorState.mode === 'single') {
+      elements.fftStatusLabel.textContent = `single @ ${fftCursorState.singleSec.toFixed(3)} s`
+      return
+    }
+
+    const minSec = Math.min(fftCursorState.rangeMinSec, fftCursorState.rangeMaxSec)
+    const maxSec = Math.max(fftCursorState.rangeMinSec, fftCursorState.rangeMaxSec)
+    if (!fftProfileState) {
+      elements.fftStatusLabel.textContent = `average ${minSec.toFixed(3)}-${maxSec.toFixed(3)} s`
+      return
+    }
+
+    const suffix = fftProfileState.source === 'slice-fallback' ? ' (slice fallback)' : ''
+    elements.fftStatusLabel.textContent = `average ${minSec.toFixed(3)}-${maxSec.toFixed(3)} s${suffix}`
+  }
+
+  const refreshFftProfile = (allowFallbackNotice: boolean): void => {
+    const state = stateStore.getState()
+    fftProfileState = computeFftProfile(state, allowFallbackNotice)
+    fftLastRefreshAtMs = performance.now()
+    elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
+    updateCursorOverlay(state)
+    renderFftPanel(state)
+  }
+
+  const scheduleFftProfileRefresh = (force: boolean, allowFallbackNotice: boolean): void => {
+    fftPendingAllowFallbackNotice = fftPendingAllowFallbackNotice || allowFallbackNotice
+    if (force) {
+      if (fftRefreshTimeoutId !== null) {
+        window.clearTimeout(fftRefreshTimeoutId)
+        fftRefreshTimeoutId = null
+      }
+      const allowNotice = fftPendingAllowFallbackNotice
+      fftPendingAllowFallbackNotice = false
+      refreshFftProfile(allowNotice)
+      return
+    }
+
+    const elapsed = performance.now() - fftLastRefreshAtMs
+    const waitMs = Math.max(0, FFT_PROFILE_REFRESH_INTERVAL_MS - elapsed)
+    if (fftRefreshTimeoutId !== null) {
+      return
+    }
+
+    fftRefreshTimeoutId = window.setTimeout(() => {
+      fftRefreshTimeoutId = null
+      const allowNotice = fftPendingAllowFallbackNotice
+      fftPendingAllowFallbackNotice = false
+      refreshFftProfile(allowNotice)
+    }, waitMs)
   }
   elements.recordActionIcon.replaceChildren(
     createLucideElement(Circle, {
@@ -646,17 +1070,17 @@ export function bootstrapApp(): void {
     const nextRing = initializeHistoryWithSilence(capacity, bins, SILENCE_DECIBELS)
 
     if (previousRing.count > 0 && previousRing.bins === bins && previousRing.capacity > 0) {
-      const copyCount = Math.min(previousRing.count, capacity)
-      const startFrom = previousRing.count - copyCount
-      const targetStart = capacity - copyCount
+      const sourceCount = Math.min(previousRing.count, previousRing.capacity)
+      const targetDenominator = Math.max(capacity - 1, 1)
+      const sourceDenominator = Math.max(sourceCount - 1, 1)
 
-      for (let index = 0; index < copyCount; index += 1) {
-        const sourceChronologicalIndex = startFrom + index
+      for (let targetIndex = 0; targetIndex < capacity; targetIndex += 1) {
+        const sourceChronologicalIndex =
+          sourceCount <= 1 ? 0 : Math.floor((targetIndex / targetDenominator) * sourceDenominator)
         const sourceColumnIndex =
-          (previousRing.head - previousRing.count + sourceChronologicalIndex + previousRing.capacity) %
-          previousRing.capacity
+          (previousRing.head - sourceCount + sourceChronologicalIndex + previousRing.capacity) % previousRing.capacity
         const sourceOffset = sourceColumnIndex * bins
-        const targetOffset = (targetStart + index) * bins
+        const targetOffset = targetIndex * bins
         nextRing.data.set(previousRing.data.subarray(sourceOffset, sourceOffset + bins), targetOffset)
       }
     }
@@ -666,12 +1090,19 @@ export function bootstrapApp(): void {
   }
 
   const ensureHistoryRingMatchesRenderer = (): void => {
+    const previousCapacity = frequencyHistoryRing.capacity
     const nextCapacity = getHistoryCapacity()
+    const capacityChanged = previousCapacity > 0 && previousCapacity !== nextCapacity
     if (frequencyHistoryRing.bins > 0) {
       ensureHistoryRingLayout(nextCapacity, frequencyHistoryRing.bins)
     }
     syncTimelineState()
     analysisService.setPlotWidth(nextCapacity)
+
+    if (capacityChanged && stateStore.getState().isRecording) {
+      pendingColumnQueue = []
+      void syncHistoryFromWorker()
+    }
   }
 
   const appendHistoryColumn = (rawFrequencyData: Float32Array): void => {
@@ -834,6 +1265,7 @@ export function bootstrapApp(): void {
       timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
       setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
       requestHistoryRender()
+      scheduleFftProfileRefresh(true, false)
     } catch (error) {
       stateStore.setState({
         errorMessage: toErrorMessage(error, '解析履歴の同期に失敗しました。'),
@@ -1495,6 +1927,18 @@ export function bootstrapApp(): void {
     }
   }
 
+  const formatAnalysisMetricsText = (sampleRateHz: number, frameSize: FrameSize): string => {
+    if (!Number.isFinite(sampleRateHz) || sampleRateHz <= 0 || !Number.isFinite(frameSize) || frameSize <= 0) {
+      return 'Actual Fs: - Hz | dt: - s | Δf: - Hz'
+    }
+
+    const dtSec = 1 / sampleRateHz
+    const freqResolutionHz = sampleRateHz / frameSize
+    const dtText = dtSec >= 1e-3 ? dtSec.toFixed(6) : dtSec.toExponential(3)
+
+    return `Actual Fs: ${Math.round(sampleRateHz)} Hz | dt: ${dtText} s | Δf: ${freqResolutionHz.toFixed(2)} Hz`
+  }
+
   elements.canvas.dataset.dprCap = String(getActiveQualityProfile().dprCap)
   applyRendererLayout()
   updateAxisConfig(stateStore.getState())
@@ -1514,6 +1958,7 @@ export function bootstrapApp(): void {
     plotWidth: Math.max(1, getHistoryCapacity()),
   })
   void syncHistoryFromWorker()
+  scheduleFftProfileRefresh(true, false)
 
   const resolveDisplayedAudioSlice = (state: AppState): DisplayedAudioSlice | null => {
     if (latestPcmWindow48k.length <= 0 || latestCapturedSamples48k <= 0) {
@@ -1681,6 +2126,7 @@ export function bootstrapApp(): void {
     timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
     timelineSyncState.capturedSamples = snapshot.capturedSamples48k
     setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
+    scheduleFftProfileRefresh(true, false)
   }
 
   const stopVisualization = async (): Promise<void> => {
@@ -1756,13 +2202,17 @@ export function bootstrapApp(): void {
     resetFrequencyHistory()
     resetAnalysisBuffers()
     renderer.clear()
+    fftProfileState = null
+    fftCursorState.lastFallbackNoticeKey = null
     stateStore.setState({ errorMessage: null })
+    scheduleFftProfileRefresh(true, false)
   }
 
   const applyQualityProfile = (_reconfigureAnalysis: boolean, redrawHistory: boolean): void => {
     const qualityProfile = getActiveQualityProfile()
     elements.canvas.dataset.dprCap = String(qualityProfile.dprCap)
     applyRendererLayout()
+    scheduleFftProfileRefresh(true, false)
 
     if (redrawHistory) {
       requestHistoryRender()
@@ -1819,6 +2269,7 @@ export function bootstrapApp(): void {
     const usesTimeZoom = selectedTimeSpan < fullTimeSpan - 1e-6
     if (usesTimeZoom) {
       requestHistoryRender()
+      scheduleFftProfileRefresh(false, false)
       return
     }
 
@@ -1830,6 +2281,7 @@ export function bootstrapApp(): void {
       nyquistHz,
     )
     renderer.drawColumn(projectedFrequencyData, state.decibelMin, state.decibelMax)
+    scheduleFftProfileRefresh(false, false)
   }
 
   const drawFrame = (timestamp: number): void => {
@@ -1906,18 +2358,28 @@ export function bootstrapApp(): void {
     renderAuthView(elements, state, authService.isEnabled)
     renderControlsView(elements, state, hasSavableAudio)
     renderPlaybackWidget(state, hasSavableAudio)
+    elements.analysisMetrics.textContent = formatAnalysisMetricsText(
+      Math.max(1, timelineSyncState.sampleRateHz),
+      state.analysisFrameSize,
+    )
     renderAnalysisControls(state)
     renderFrequencyControls(state)
     renderDecibelControls(state)
     renderTimeControls(state)
     renderDecibelTicks(state.decibelMin, state.decibelMax)
     updateAxisConfig(state)
+    elements.fftAverageToggleButton.disabled = state.authStatus !== 'signed-in'
+    elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
 
     const frequencyRangeChanged =
       lastRenderedRangeMinHz !== state.frequencyMinHz || lastRenderedRangeMaxHz !== state.frequencyMaxHz
     const decibelRangeChanged =
       lastRenderedDecibelMin !== state.decibelMin || lastRenderedDecibelMax !== state.decibelMax
     const timeRangeChanged = lastRenderedTimeMinSec !== state.timeMinSec || lastRenderedTimeMaxSec !== state.timeMaxSec
+    const analysisConfigChanged =
+      lastRenderedFrameSize !== state.analysisFrameSize ||
+      lastRenderedOverlapPercent !== state.analysisOverlapPercent ||
+      lastRenderedUpperFrequencyHz !== state.analysisUpperFrequencyHz
     if (frequencyRangeChanged || decibelRangeChanged || timeRangeChanged) {
       requestHistoryRender()
       lastRenderedRangeMinHz = state.frequencyMinHz
@@ -1927,6 +2389,15 @@ export function bootstrapApp(): void {
       lastRenderedTimeMinSec = state.timeMinSec
       lastRenderedTimeMaxSec = state.timeMaxSec
     }
+    if (analysisConfigChanged) {
+      lastRenderedFrameSize = state.analysisFrameSize
+      lastRenderedOverlapPercent = state.analysisOverlapPercent
+      lastRenderedUpperFrequencyHz = state.analysisUpperFrequencyHz
+      scheduleFftProfileRefresh(true, false)
+    }
+
+    updateCursorOverlay(state)
+    renderFftPanel(state)
 
     const isRecordingRouteVisible = !elements.appPage.hidden
     if (state.errorMessage && isRecordingRouteVisible) {
@@ -2261,6 +2732,168 @@ export function bootstrapApp(): void {
   elements.timeSlider.addEventListener('pointerup', endTimeSliderDrag)
   elements.timeSlider.addEventListener('pointercancel', endTimeSliderDrag)
 
+  const toggleAverageFftMode = (enable: boolean): void => {
+    const state = stateStore.getState()
+    if (enable) {
+      const minimumRangeSec = getMinimumCursorRangeSec(state)
+      const range = ensureAverageCursorRange(fftCursorState.singleSec, minimumRangeSec)
+      fftCursorState.mode = 'average'
+      fftCursorState.rangeMinSec = range.minSec
+      fftCursorState.rangeMaxSec = range.maxSec
+      if (range.impossible) {
+        showFallbackNoticeIfNeeded(minimumRangeSec, 'impossible', true)
+      }
+      scheduleFftProfileRefresh(true, true)
+      return
+    }
+
+    const midpointSec = clampCursorSeconds((fftCursorState.rangeMinSec + fftCursorState.rangeMaxSec) / 2)
+    fftCursorState.mode = 'single'
+    fftCursorState.singleSec = midpointSec
+    fftCursorState.lastFallbackNoticeKey = null
+    scheduleFftProfileRefresh(true, false)
+  }
+
+  const resolveVisibleCursorPositions = (
+    state: AppState,
+    metrics: PlotMetrics,
+  ): Array<{ handle: FftCursorDragHandle; xPx: number }> => {
+    const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
+    const visibleMinSec = state.timeMinSec
+    const visibleMaxSec = state.timeMaxSec
+    const output: Array<{ handle: FftCursorDragHandle; xPx: number }> = []
+    const appendVisiblePosition = (seconds: number, handle: FftCursorDragHandle): void => {
+      if (seconds < visibleMinSec || seconds > visibleMaxSec) {
+        return
+      }
+      const ratio = clamp((seconds - visibleMinSec) / visibleSpanSec, 0, 1)
+      output.push({
+        handle,
+        xPx: metrics.plotX + ratio * metrics.plotWidth,
+      })
+    }
+
+    if (fftCursorState.mode === 'single') {
+      appendVisiblePosition(fftCursorState.singleSec, 'single')
+      return output
+    }
+
+    appendVisiblePosition(fftCursorState.rangeMinSec, 'min')
+    appendVisiblePosition(fftCursorState.rangeMaxSec, 'max')
+    return output
+  }
+
+  const beginFftCursorDrag = (event: PointerEvent): void => {
+    const state = stateStore.getState()
+    if (state.authStatus !== 'signed-in') {
+      return
+    }
+
+    const metrics = renderer.getPlotMetrics()
+    if (metrics.plotWidth <= 0 || metrics.plotHeight <= 0) {
+      return
+    }
+
+    const rect = elements.canvas.getBoundingClientRect()
+    const pointerX = (event.clientX - rect.left) * Math.max(1, metrics.dpr)
+    const visiblePositions = resolveVisibleCursorPositions(state, metrics)
+    if (visiblePositions.length <= 0) {
+      return
+    }
+
+    const hitRadiusPx = CURSOR_HIT_TEST_PX * Math.max(1, metrics.dpr)
+    let selected: { handle: FftCursorDragHandle; xPx: number } | null = null
+    let minDistance = Number.POSITIVE_INFINITY
+    for (const candidate of visiblePositions) {
+      const distance = Math.abs(pointerX - candidate.xPx)
+      if (distance > hitRadiusPx) {
+        continue
+      }
+      if (distance < minDistance) {
+        selected = candidate
+        minDistance = distance
+      }
+    }
+
+    if (!selected) {
+      return
+    }
+
+    fftCursorState.activeDragHandle = selected.handle
+    fftCursorState.activePointerId = event.pointerId
+    elements.canvas.setPointerCapture(event.pointerId)
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  const applyFftCursorDrag = (event: PointerEvent): void => {
+    if (fftCursorState.activePointerId !== event.pointerId || !fftCursorState.activeDragHandle) {
+      return
+    }
+
+    const state = stateStore.getState()
+    const metrics = renderer.getPlotMetrics()
+    const rect = elements.canvas.getBoundingClientRect()
+    if (metrics.plotWidth <= 0 || rect.width <= 0) {
+      return
+    }
+
+    const pointerX = (event.clientX - rect.left) * Math.max(1, metrics.dpr)
+    const ratio = clamp((pointerX - metrics.plotX) / metrics.plotWidth, 0, 1)
+    const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
+    const nextSec = clampCursorSeconds(state.timeMinSec + ratio * visibleSpanSec)
+
+    if (fftCursorState.mode === 'single' || fftCursorState.activeDragHandle === 'single') {
+      fftCursorState.singleSec = nextSec
+      scheduleFftProfileRefresh(false, false)
+      updateCursorOverlay(state)
+      return
+    }
+
+    if (fftCursorState.activeDragHandle === 'min') {
+      fftCursorState.rangeMinSec = Math.min(nextSec, fftCursorState.rangeMaxSec)
+    } else {
+      fftCursorState.rangeMaxSec = Math.max(nextSec, fftCursorState.rangeMinSec)
+    }
+
+    scheduleFftProfileRefresh(false, false)
+    updateCursorOverlay(state)
+  }
+
+  const endFftCursorDrag = (event: PointerEvent): void => {
+    if (fftCursorState.activePointerId !== event.pointerId) {
+      return
+    }
+
+    fftCursorState.activeDragHandle = null
+    fftCursorState.activePointerId = null
+    if (elements.canvas.hasPointerCapture(event.pointerId)) {
+      elements.canvas.releasePointerCapture(event.pointerId)
+    }
+    scheduleFftProfileRefresh(true, true)
+  }
+
+  elements.fftAverageToggleButton.addEventListener('click', () => {
+    const state = stateStore.getState()
+    if (state.authStatus !== 'signed-in') {
+      return
+    }
+    toggleAverageFftMode(fftCursorState.mode !== 'average')
+  })
+
+  elements.canvas.addEventListener('pointerdown', (event) => {
+    beginFftCursorDrag(event)
+  })
+  elements.canvas.addEventListener('pointermove', (event) => {
+    if (fftCursorState.activePointerId !== event.pointerId) {
+      return
+    }
+    event.preventDefault()
+    applyFftCursorDrag(event)
+  })
+  elements.canvas.addEventListener('pointerup', endFftCursorDrag)
+  elements.canvas.addEventListener('pointercancel', endFftCursorDrag)
+
   elements.startButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
 
@@ -2321,6 +2954,7 @@ export function bootstrapApp(): void {
         hasMicPermission: true,
         audioReady: true,
       })
+      scheduleFftProfileRefresh(true, false)
 
       frameId = requestAnimationFrame(drawFrame)
       void syncHistoryFromWorker()
@@ -2339,6 +2973,7 @@ export function bootstrapApp(): void {
         captureChunkUnsubscribe = null
       }
       await audioEngine.stop().catch(() => undefined)
+      scheduleFftProfileRefresh(true, false)
     }
   })
 
@@ -2475,6 +3110,10 @@ export function bootstrapApp(): void {
     if (resizeObserver) {
       resizeObserver.disconnect()
     }
+    if (fftRefreshTimeoutId !== null) {
+      window.clearTimeout(fftRefreshTimeoutId)
+      fftRefreshTimeoutId = null
+    }
 
     void stopVisualization()
     void stopPlayback()
@@ -2503,6 +3142,7 @@ export function bootstrapApp(): void {
 
   if (resizeObserver) {
     resizeObserver.observe(elements.canvas)
+    resizeObserver.observe(elements.fftCanvas)
   }
 
   window.addEventListener('resize', () => {

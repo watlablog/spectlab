@@ -630,6 +630,59 @@ body {
   gap: 0.5rem;
 }
 
+.fft-profile-panel {
+  border: 1px solid rgba(141, 189, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(7, 22, 40, 0.55);
+  padding: 0.55rem 0.6rem 0.65rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.fft-profile-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+
+.fft-profile-title {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.fft-average-toggle-button {
+  min-height: 34px;
+  border-radius: 10px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.fft-average-toggle-button.is-active {
+  background: #2a6cf8;
+}
+
+.fft-average-toggle-button.is-active:hover:enabled {
+  background: #3a79ff;
+}
+
+.fft-status-label {
+  margin: 0;
+  min-height: 1.1rem;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+#fft-canvas {
+  width: 100%;
+  height: min(24vh, 190px);
+  border-radius: 10px;
+  border: 1px solid rgba(141, 189, 255, 0.2);
+  background: rgba(2, 10, 20, 0.95);
+  display: block;
+}
+
 .range-field {
   display: grid;
   grid-template-rows: auto auto;
@@ -670,9 +723,26 @@ body {
   padding: 0.65rem 0.9rem;
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.8rem;
   z-index: 20;
+}
+
+.account-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+}
+
+.analysis-metrics {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .account-dock .user-name {
@@ -726,6 +796,10 @@ body {
     gap: 0.45rem;
   }
 
+  #fft-canvas {
+    height: min(22vh, 160px);
+  }
+
   .range-field span {
     font-size: 0.68rem;
   }
@@ -733,5 +807,10 @@ body {
   .account-dock {
     bottom: 0.55rem;
     padding: 0.55rem 0.7rem;
+  }
+
+  .analysis-metrics {
+    font-size: 0.68rem;
+    white-space: normal;
   }
 }
