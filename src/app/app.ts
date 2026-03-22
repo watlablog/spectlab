@@ -34,8 +34,8 @@ const MIN_OVERLAP_PERCENT = 0
 const MAX_OVERLAP_PERCENT = 99
 const DEFAULT_DECIBEL_MIN = -20
 const DEFAULT_DECIBEL_MAX = 80
-const DECIBEL_INPUT_MIN = -40
-const DECIBEL_INPUT_MAX = 140
+const DECIBEL_INPUT_MIN = -100
+const DECIBEL_INPUT_MAX = 200
 const DECIBEL_STEP = 1
 const MIN_DECIBEL_GAP = 1
 const DECIBEL_TICK_COUNT = 6
@@ -153,6 +153,20 @@ function normalizeOverlapPercent(value: number): number {
   return clamp(Math.round(value), MIN_OVERLAP_PERCENT, MAX_OVERLAP_PERCENT)
 }
 
+function parseFiniteNumberInput(value: string): number | null {
+  const trimmed = value.trim()
+  if (trimmed.length === 0) {
+    return null
+  }
+
+  const parsed = Number(trimmed)
+  if (!Number.isFinite(parsed)) {
+    return null
+  }
+
+  return parsed
+}
+
 function parseFrameSizeInput(value: string): FrameSize | null {
   const parsed = Number(value)
   if (!Number.isFinite(parsed)) {
@@ -182,63 +196,53 @@ function parseUpperFrequencyInput(value: string): UpperFrequencyHz | null {
 }
 
 function parseOverlapInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
+  const parsed = parseFiniteNumberInput(value)
+  if (parsed === null) {
     return null
   }
-
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed)) {
-    return null
-  }
-
-  if (parsed < MIN_OVERLAP_PERCENT || parsed > MAX_OVERLAP_PERCENT) {
-    return null
-  }
-
-  return normalizeOverlapPercent(parsed)
+  return Math.round(parsed)
 }
 
 function parseDecibelInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
+  const parsed = parseFiniteNumberInput(value)
+  if (parsed === null) {
     return null
   }
-
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed)) {
-    return null
-  }
-
   return roundToDecibelStep(parsed)
 }
 
 function parseFrequencyInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
+  const parsed = parseFiniteNumberInput(value)
+  if (parsed === null) {
     return null
   }
-
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed)) {
-    return null
-  }
-
   return roundToFrequencyStep(parsed)
 }
 
 function parseTimeInput(value: string): number | null {
-  const trimmed = value.trim()
-  if (trimmed.length === 0) {
+  const parsed = parseFiniteNumberInput(value)
+  if (parsed === null) {
     return null
   }
-
-  const parsed = Number(trimmed)
-  if (!Number.isFinite(parsed)) {
-    return null
-  }
-
   return Math.round(parsed / TIME_STEP_SEC) * TIME_STEP_SEC
+}
+
+function formatByStep(value: number, step: number): string {
+  if (step >= 1) {
+    return String(Math.round(value))
+  }
+  const decimals = Math.max(0, Math.round(Math.log10(1 / step)))
+  return value.toFixed(decimals)
+}
+
+function showNumericInputAlert(label: string): void {
+  window.alert(`${label} は数値で入力してください。`)
+}
+
+function showInputRangeAlert(label: string, min: number, max: number, step: number): void {
+  window.alert(
+    `${label} の入力範囲は ${formatByStep(min, step)} から ${formatByStep(max, step)} です。`,
+  )
 }
 
 function normalizeDecibelRange(minDb: number, maxDb: number): { minDb: number; maxDb: number } {
@@ -1084,6 +1088,14 @@ export function bootstrapApp(): void {
     const state = stateStore.getState()
     const parsedPercent = parseOverlapInput(elements.overlapInput.value)
     if (parsedPercent === null) {
+      showNumericInputAlert('Overlap [%]')
+      restoreOverlapInput()
+      return
+    }
+    elements.overlapInput.value = String(parsedPercent)
+
+    if (parsedPercent < MIN_OVERLAP_PERCENT || parsedPercent > MAX_OVERLAP_PERCENT) {
+      showInputRangeAlert('Overlap [%]', MIN_OVERLAP_PERCENT, MAX_OVERLAP_PERCENT, 1)
       restoreOverlapInput()
       return
     }
@@ -1145,13 +1157,18 @@ export function bootstrapApp(): void {
     const inputEl = target === 'min' ? elements.dbMinInput : elements.dbMaxInput
     const parsedDb = parseDecibelInput(inputEl.value)
     if (parsedDb === null) {
+      showNumericInputAlert(target === 'min' ? 'Amp.Min' : 'Amp.Max')
       restoreDecibelInputs()
       return
     }
+    inputEl.value = String(parsedDb)
 
     if (target === 'min') {
-      const isValid = parsedDb >= DECIBEL_INPUT_MIN && parsedDb <= state.decibelMax - MIN_DECIBEL_GAP
+      const minAllowed = DECIBEL_INPUT_MIN
+      const maxAllowed = state.decibelMax - MIN_DECIBEL_GAP
+      const isValid = parsedDb >= minAllowed && parsedDb <= maxAllowed
       if (!isValid) {
+        showInputRangeAlert('Amp.Min', minAllowed, maxAllowed, DECIBEL_STEP)
         restoreDecibelInputs()
         return
       }
@@ -1160,8 +1177,11 @@ export function bootstrapApp(): void {
       return
     }
 
-    const isValid = parsedDb <= DECIBEL_INPUT_MAX && parsedDb >= state.decibelMin + MIN_DECIBEL_GAP
+    const minAllowed = state.decibelMin + MIN_DECIBEL_GAP
+    const maxAllowed = DECIBEL_INPUT_MAX
+    const isValid = parsedDb <= maxAllowed && parsedDb >= minAllowed
     if (!isValid) {
+      showInputRangeAlert('Amp.Max', minAllowed, maxAllowed, DECIBEL_STEP)
       restoreDecibelInputs()
       return
     }
@@ -1219,14 +1239,18 @@ export function bootstrapApp(): void {
     const parsedHz = parseFrequencyInput(inputEl.value)
 
     if (parsedHz === null) {
+      showNumericInputAlert(target === 'min' ? 'Freq.Min' : 'Freq.Max')
       restoreFrequencyInputs()
       return
     }
+    inputEl.value = String(parsedHz)
 
     if (target === 'min') {
-      const isValid =
-        parsedHz >= state.frequencyDomainMinHz && parsedHz <= state.frequencyMaxHz - MIN_RANGE_GAP_HZ
+      const minAllowed = state.frequencyDomainMinHz
+      const maxAllowed = state.frequencyMaxHz - MIN_RANGE_GAP_HZ
+      const isValid = parsedHz >= minAllowed && parsedHz <= maxAllowed
       if (!isValid) {
+        showInputRangeAlert('Freq.Min', minAllowed, maxAllowed, FREQUENCY_STEP_HZ)
         restoreFrequencyInputs()
         return
       }
@@ -1235,8 +1259,11 @@ export function bootstrapApp(): void {
       return
     }
 
-    const isValid = parsedHz <= state.frequencyDomainMaxHz && parsedHz >= state.frequencyMinHz + MIN_RANGE_GAP_HZ
+    const minAllowed = state.frequencyMinHz + MIN_RANGE_GAP_HZ
+    const maxAllowed = state.frequencyDomainMaxHz
+    const isValid = parsedHz <= maxAllowed && parsedHz >= minAllowed
     if (!isValid) {
+      showInputRangeAlert('Freq.Max', minAllowed, maxAllowed, FREQUENCY_STEP_HZ)
       restoreFrequencyInputs()
       return
     }
@@ -1254,13 +1281,18 @@ export function bootstrapApp(): void {
     const parsedSec = parseTimeInput(inputEl.value)
 
     if (parsedSec === null) {
+      showNumericInputAlert(target === 'min' ? 'Time.Min' : 'Time.Max')
       restoreTimeInputs()
       return
     }
+    inputEl.value = formatByStep(parsedSec, TIME_STEP_SEC)
 
     if (target === 'min') {
-      const isValid = parsedSec >= state.timeDomainMinSec && parsedSec <= state.timeMaxSec - MIN_TIME_GAP_SEC
+      const minAllowed = state.timeDomainMinSec
+      const maxAllowed = state.timeMaxSec - MIN_TIME_GAP_SEC
+      const isValid = parsedSec >= minAllowed && parsedSec <= maxAllowed
       if (!isValid) {
+        showInputRangeAlert('Time.Min', minAllowed, maxAllowed, TIME_STEP_SEC)
         restoreTimeInputs()
         return
       }
@@ -1269,8 +1301,11 @@ export function bootstrapApp(): void {
       return
     }
 
-    const isValid = parsedSec <= state.timeDomainMaxSec && parsedSec >= state.timeMinSec + MIN_TIME_GAP_SEC
+    const minAllowed = state.timeMinSec + MIN_TIME_GAP_SEC
+    const maxAllowed = state.timeDomainMaxSec
+    const isValid = parsedSec <= maxAllowed && parsedSec >= minAllowed
     if (!isValid) {
+      showInputRangeAlert('Time.Max', minAllowed, maxAllowed, TIME_STEP_SEC)
       restoreTimeInputs()
       return
     }
