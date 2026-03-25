@@ -59,7 +59,8 @@ const FFT_PANEL_DOMAIN_MIN_HZ = 0
 const FFT_PANEL_TICK_COUNT = 6
 const FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC = 10
 const FFT_PROFILE_REFRESH_INTERVAL_MS = 50
-const CURSOR_HIT_TEST_PX = 10
+const CURSOR_NEAR_TAP_THRESHOLD_DESKTOP_PX = 20
+const CURSOR_NEAR_TAP_THRESHOLD_MOBILE_PX = 28
 const FFT_RENDER_SMOOTH_ALPHA = 0.35
 
 interface QualityProfile {
@@ -152,6 +153,14 @@ interface FftProfileState {
   spectrumDb: Float32Array
   source: FftComputationSource
   updatedAtMs: number
+}
+
+interface CursorCandidate {
+  handle: FftCursorDragHandle
+  seconds: number
+  visible: boolean
+  distancePx: number
+  distanceSec: number
 }
 
 function routeToPath(route: AppRoute): string {
@@ -2754,33 +2763,130 @@ export function bootstrapApp(): void {
     scheduleFftProfileRefresh(true, false)
   }
 
-  const resolveVisibleCursorPositions = (
+  const getNearTapThresholdCssPx = (): number =>
+    isMobileViewport() ? CURSOR_NEAR_TAP_THRESHOLD_MOBILE_PX : CURSOR_NEAR_TAP_THRESHOLD_DESKTOP_PX
+
+  const resolveCanvasPointerX = (clientX: number, rect: DOMRect, dpr: number): number => {
+    return (clientX - rect.left) * Math.max(1, dpr)
+  }
+
+  const getTapSecondFromPointer = (
     state: AppState,
     metrics: PlotMetrics,
-  ): Array<{ handle: FftCursorDragHandle; xPx: number }> => {
+    pointerX: number,
+  ): number => {
+    if (metrics.plotWidth <= 0) {
+      return clampCursorSeconds(state.timeMinSec)
+    }
+
+    const ratio = clamp((pointerX - metrics.plotX) / metrics.plotWidth, 0, 1)
+    const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
+    return clampCursorSeconds(state.timeMinSec + ratio * visibleSpanSec)
+  }
+
+  const buildCursorCandidate = (
+    state: AppState,
+    metrics: PlotMetrics,
+    pointerX: number,
+    tapSec: number,
+    handle: FftCursorDragHandle,
+    seconds: number,
+  ): CursorCandidate => {
     const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
     const visibleMinSec = state.timeMinSec
     const visibleMaxSec = state.timeMaxSec
-    const output: Array<{ handle: FftCursorDragHandle; xPx: number }> = []
-    const appendVisiblePosition = (seconds: number, handle: FftCursorDragHandle): void => {
-      if (seconds < visibleMinSec || seconds > visibleMaxSec) {
+    const visible = seconds >= visibleMinSec && seconds <= visibleMaxSec
+    const ratio = clamp((seconds - visibleMinSec) / visibleSpanSec, 0, 1)
+    const cursorX = metrics.plotX + ratio * metrics.plotWidth
+    return {
+      handle,
+      seconds,
+      visible,
+      distancePx: visible ? Math.abs(pointerX - cursorX) : Number.POSITIVE_INFINITY,
+      distanceSec: Math.abs(seconds - tapSec),
+    }
+  }
+
+  const resolveFftTapTargetHandle = (
+    state: AppState,
+    metrics: PlotMetrics,
+    pointerX: number,
+    tapSec: number,
+  ): FftCursorDragHandle | null => {
+    const candidates: CursorCandidate[] = []
+    if (fftCursorState.mode === 'single') {
+      candidates.push(buildCursorCandidate(state, metrics, pointerX, tapSec, 'single', fftCursorState.singleSec))
+      return candidates[0]?.handle ?? null
+    }
+
+    candidates.push(buildCursorCandidate(state, metrics, pointerX, tapSec, 'min', fftCursorState.rangeMinSec))
+    candidates.push(buildCursorCandidate(state, metrics, pointerX, tapSec, 'max', fftCursorState.rangeMaxSec))
+
+    const compareByDistancePxThenSec = (a: CursorCandidate, b: CursorCandidate): number => {
+      if (a.distancePx !== b.distancePx) {
+        return a.distancePx - b.distancePx
+      }
+      return a.distanceSec - b.distanceSec
+    }
+    const compareByDistanceSecThenPx = (a: CursorCandidate, b: CursorCandidate): number => {
+      if (a.distanceSec !== b.distanceSec) {
+        return a.distanceSec - b.distanceSec
+      }
+      return a.distancePx - b.distancePx
+    }
+
+    const nearTapThresholdPx = getNearTapThresholdCssPx() * Math.max(1, metrics.dpr)
+    const visibleNearCandidates = candidates.filter(
+      (candidate) => candidate.visible && candidate.distancePx <= nearTapThresholdPx,
+    )
+    if (visibleNearCandidates.length > 0) {
+      visibleNearCandidates.sort(compareByDistancePxThenSec)
+      return visibleNearCandidates[0]?.handle ?? null
+    }
+
+    const invisibleCandidates = candidates.filter((candidate) => !candidate.visible)
+    if (invisibleCandidates.length > 0) {
+      invisibleCandidates.sort(compareByDistanceSecThenPx)
+      return invisibleCandidates[0]?.handle ?? null
+    }
+
+    const nearestCandidates = [...candidates].sort(compareByDistancePxThenSec)
+    return nearestCandidates[0]?.handle ?? null
+  }
+
+  const moveFftCursorToSec = (handle: FftCursorDragHandle, seconds: number): void => {
+    const safeSeconds = clampCursorSeconds(seconds)
+    if (fftCursorState.mode === 'single' || handle === 'single') {
+      fftCursorState.singleSec = safeSeconds
+      return
+    }
+
+    if (handle === 'min') {
+      if (safeSeconds <= fftCursorState.rangeMaxSec) {
+        fftCursorState.rangeMinSec = safeSeconds
         return
       }
-      const ratio = clamp((seconds - visibleMinSec) / visibleSpanSec, 0, 1)
-      output.push({
-        handle,
-        xPx: metrics.plotX + ratio * metrics.plotWidth,
-      })
+
+      const previousMaxSec = fftCursorState.rangeMaxSec
+      fftCursorState.rangeMinSec = previousMaxSec
+      fftCursorState.rangeMaxSec = safeSeconds
+      if (fftCursorState.activeDragHandle === 'min') {
+        fftCursorState.activeDragHandle = 'max'
+      }
+      return
     }
 
-    if (fftCursorState.mode === 'single') {
-      appendVisiblePosition(fftCursorState.singleSec, 'single')
-      return output
+    if (safeSeconds >= fftCursorState.rangeMinSec) {
+      fftCursorState.rangeMaxSec = safeSeconds
+      return
     }
 
-    appendVisiblePosition(fftCursorState.rangeMinSec, 'min')
-    appendVisiblePosition(fftCursorState.rangeMaxSec, 'max')
-    return output
+    const previousMinSec = fftCursorState.rangeMinSec
+    fftCursorState.rangeMaxSec = previousMinSec
+    fftCursorState.rangeMinSec = safeSeconds
+    if (fftCursorState.activeDragHandle === 'max') {
+      fftCursorState.activeDragHandle = 'min'
+    }
   }
 
   const beginFftCursorDrag = (event: PointerEvent): void => {
@@ -2795,33 +2901,19 @@ export function bootstrapApp(): void {
     }
 
     const rect = elements.canvas.getBoundingClientRect()
-    const pointerX = (event.clientX - rect.left) * Math.max(1, metrics.dpr)
-    const visiblePositions = resolveVisibleCursorPositions(state, metrics)
-    if (visiblePositions.length <= 0) {
+    const pointerX = resolveCanvasPointerX(event.clientX, rect, metrics.dpr)
+    const tapSeconds = getTapSecondFromPointer(state, metrics, pointerX)
+    const targetHandle = resolveFftTapTargetHandle(state, metrics, pointerX, tapSeconds)
+    if (!targetHandle) {
       return
     }
 
-    const hitRadiusPx = CURSOR_HIT_TEST_PX * Math.max(1, metrics.dpr)
-    let selected: { handle: FftCursorDragHandle; xPx: number } | null = null
-    let minDistance = Number.POSITIVE_INFINITY
-    for (const candidate of visiblePositions) {
-      const distance = Math.abs(pointerX - candidate.xPx)
-      if (distance > hitRadiusPx) {
-        continue
-      }
-      if (distance < minDistance) {
-        selected = candidate
-        minDistance = distance
-      }
-    }
-
-    if (!selected) {
-      return
-    }
-
-    fftCursorState.activeDragHandle = selected.handle
+    fftCursorState.activeDragHandle = targetHandle
     fftCursorState.activePointerId = event.pointerId
     elements.canvas.setPointerCapture(event.pointerId)
+    moveFftCursorToSec(targetHandle, tapSeconds)
+    scheduleFftProfileRefresh(false, false)
+    updateCursorOverlay(state)
     event.preventDefault()
     event.stopPropagation()
   }
@@ -2838,23 +2930,9 @@ export function bootstrapApp(): void {
       return
     }
 
-    const pointerX = (event.clientX - rect.left) * Math.max(1, metrics.dpr)
-    const ratio = clamp((pointerX - metrics.plotX) / metrics.plotWidth, 0, 1)
-    const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
-    const nextSec = clampCursorSeconds(state.timeMinSec + ratio * visibleSpanSec)
-
-    if (fftCursorState.mode === 'single' || fftCursorState.activeDragHandle === 'single') {
-      fftCursorState.singleSec = nextSec
-      scheduleFftProfileRefresh(false, false)
-      updateCursorOverlay(state)
-      return
-    }
-
-    if (fftCursorState.activeDragHandle === 'min') {
-      fftCursorState.rangeMinSec = Math.min(nextSec, fftCursorState.rangeMaxSec)
-    } else {
-      fftCursorState.rangeMaxSec = Math.max(nextSec, fftCursorState.rangeMinSec)
-    }
+    const pointerX = resolveCanvasPointerX(event.clientX, rect, metrics.dpr)
+    const nextSec = getTapSecondFromPointer(state, metrics, pointerX)
+    moveFftCursorToSec(fftCursorState.activeDragHandle, nextSec)
 
     scheduleFftProfileRefresh(false, false)
     updateCursorOverlay(state)
