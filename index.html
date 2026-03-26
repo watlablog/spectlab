@@ -19,22 +19,31 @@
         <section class="panel canvas-panel">
           <div class="y-axis-area">
             <div class="graph-action-widget">
-              <button id="start-button" class="btn btn-accent graph-action-button record-toggle-button" type="button" aria-label="Start recording">
-                <span class="record-toggle-icons" aria-hidden="true">
-                  <span id="record-action-icon" class="action-icon action-icon-record"></span>
-                  <span id="record-stop-action-icon" class="action-icon action-icon-record-stop"></span>
-                </span>
-                <span class="action-label action-label-record">Record</span>
-                <span class="action-label action-label-stop">Stop</span>
-              </button>
-              <button id="clear-button" class="btn graph-action-button" type="button">
-                <span id="clear-action-icon" class="action-icon" aria-hidden="true"></span>
-                <span class="action-label">Clear</span>
-              </button>
-              <button id="save-button" class="btn graph-action-button" type="button">
-                <span id="save-action-icon" class="action-icon" aria-hidden="true"></span>
-                <span class="action-label">Save Audio</span>
-              </button>
+              <div class="graph-action-group">
+                <button id="start-button" class="btn btn-accent graph-action-button record-toggle-button" type="button" aria-label="Start recording">
+                  <span class="record-toggle-icons" aria-hidden="true">
+                    <span id="record-action-icon" class="action-icon action-icon-record"></span>
+                    <span id="record-stop-action-icon" class="action-icon action-icon-record-stop"></span>
+                  </span>
+                  <span class="action-label action-label-record">Record</span>
+                  <span class="action-label action-label-stop">Stop</span>
+                </button>
+                <button id="clear-button" class="btn graph-action-button" type="button">
+                  <span id="clear-action-icon" class="action-icon" aria-hidden="true"></span>
+                  <span class="action-label">Clear</span>
+                </button>
+              </div>
+              <div class="graph-action-group">
+                <button id="save-button" class="btn graph-action-button" type="button">
+                  <span id="save-action-icon" class="action-icon" aria-hidden="true"></span>
+                  <span class="action-label">Save Audio</span>
+                </button>
+                <button id="load-audio-button" class="btn graph-action-button" type="button">
+                  <span id="load-audio-action-icon" class="action-icon" aria-hidden="true"></span>
+                  <span class="action-label">Load Audio</span>
+                </button>
+              </div>
+              <input id="load-audio-input" type="file" accept=".wav,.mp3,.m4a,.aac,.flac,.ogg,.webm,audio/*" hidden />
             </div>
             <div class="chart-layout">
               <div id="freq-slider-column" class="y-range-row">

@@ -5,11 +5,16 @@ export type UpperFrequencyHz = 5000 | 10000 | 20000
 export interface AppState {
   authStatus: AuthStatus
   userName: string | null
+  analysisSource: 'live' | 'file'
   isRecording: boolean
   isPlayingBack: boolean
   isSavingAudio: boolean
+  isLoadingFile: boolean
   hasMicPermission: boolean
   audioReady: boolean
+  loadedAudioName: string | null
+  loadedAudioDurationSec: number | null
+  currentSampleRateHz: number | null
   analysisFrameSize: FrameSize
   analysisOverlapPercent: number
   analysisUpperFrequencyHz: UpperFrequencyHz

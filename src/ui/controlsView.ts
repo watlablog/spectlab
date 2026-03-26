@@ -3,20 +3,26 @@ import type { UIElements } from './dom'
 
 export function renderControlsView(elements: UIElements, state: AppState, hasSavableAudio: boolean): void {
   const isSignedIn = state.authStatus === 'signed-in'
-  elements.startButton.disabled = !isSignedIn || state.isPlayingBack || state.isSavingAudio
+  const isBusy = state.isSavingAudio || state.isLoadingFile
+  elements.startButton.disabled = !isSignedIn || state.isPlayingBack || isBusy
   elements.startButton.classList.toggle('is-recording', state.isRecording)
   elements.startButton.setAttribute('aria-label', state.isRecording ? 'Stop recording' : 'Start recording')
-  elements.playbackToggleButton.disabled =
-    !isSignedIn || state.isRecording || state.isSavingAudio || !hasSavableAudio
-  elements.clearButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+  elements.playbackToggleButton.disabled = !isSignedIn || state.isRecording || isBusy || !hasSavableAudio
+  elements.clearButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
+  elements.loadAudioButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
   elements.saveButton.disabled =
-    !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio || !hasSavableAudio
-  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
-  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
-  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || state.isSavingAudio
+    !isSignedIn || state.isRecording || state.isPlayingBack || isBusy || !hasSavableAudio
+  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
+  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
+  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
 
   if (!isSignedIn) {
     elements.micStatus.textContent = 'ログイン後に利用できます。'
+    return
+  }
+
+  if (state.isLoadingFile) {
+    elements.micStatus.textContent = '音声ファイルを読み込み中です。'
     return
   }
 
@@ -32,6 +38,12 @@ export function renderControlsView(elements: UIElements, state: AppState, hasSav
 
   if (state.isSavingAudio) {
     elements.micStatus.textContent = '保存中です。完了までお待ちください。'
+    return
+  }
+
+  if (state.analysisSource === 'file') {
+    const name = state.loadedAudioName ?? 'audio file'
+    elements.micStatus.textContent = `File mode: ${name}`
     return
   }
 

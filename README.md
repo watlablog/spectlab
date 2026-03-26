@@ -1,6 +1,6 @@
 # SpectLab
 
-Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `10000`）。`Upper [Hz]` に応じて `AudioContext` のサンプルレートは Nyquist 条件（`sampleRate >= 2 * Upper`）を満たす値を要求します。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。停止中は現在の表示範囲の音声を `WAV` としてローカル保存できます。
+Vite + TypeScript で構築した静的SPAです。`/login` でGoogleログインし、`/recording` へ遷移後にマイク入力を取得してリアルタイムでスペクトログラムを描画します。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `10000`）。`Upper [Hz]` に応じて `AudioContext` のサンプルレートは Nyquist 条件（`sampleRate >= 2 * Upper`）を満たす値を要求します。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。停止中は現在の表示範囲の音声を `WAV` としてローカル保存できます。さらに `Load Audio` でローカル音声ファイルを読み込み、Fileモードとして `0..ファイル長` の時間ドメインで表示できます（30分まで、サーバ送信なし）。
 
 ## 1. Setup
 
@@ -40,6 +40,9 @@ firebase deploy --only hosting
 - dBカラーバーに目盛りが表示され、`Max/Min` のEnter確定で色レンジが更新される
 - 停止中に `表示範囲を保存` で現在の `Time.Min..Time.Max` がWAV保存される
 - 停止時に直近10秒の取得PCMから再解析し、最終表示を補正する
+- `Load Audio` でローカル音声を読み込める（30分超は拒否）
+- Fileモードでは `Time.Max` がファイル長になり、表示範囲の再生/保存が有効
+- Fileモード中に `Record` を押すとLiveモード（10秒窓）へ戻る
 
 ### Auth
 - Googleログイン成功後にユーザー表示が切り替わる

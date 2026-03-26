@@ -11,6 +11,9 @@ export interface UIElements {
   recordStopActionIcon: HTMLSpanElement
   clearButton: HTMLButtonElement
   clearActionIcon: HTMLSpanElement
+  loadAudioButton: HTMLButtonElement
+  loadAudioInput: HTMLInputElement
+  loadAudioActionIcon: HTMLSpanElement
   saveActionIcon: HTMLSpanElement
   playbackToggleButton: HTMLButtonElement
   playbackIconPlay: HTMLSpanElement
@@ -107,6 +110,9 @@ export function getUIElements(): UIElements {
     recordStopActionIcon: getRequiredElement<HTMLSpanElement>('record-stop-action-icon', 'span'),
     clearButton: getRequiredElement<HTMLButtonElement>('clear-button', 'button'),
     clearActionIcon: getRequiredElement<HTMLSpanElement>('clear-action-icon', 'span'),
+    loadAudioButton: getRequiredElement<HTMLButtonElement>('load-audio-button', 'button'),
+    loadAudioInput: getRequiredElement<HTMLInputElement>('load-audio-input', 'input'),
+    loadAudioActionIcon: getRequiredElement<HTMLSpanElement>('load-audio-action-icon', 'span'),
     saveActionIcon: getRequiredElement<HTMLSpanElement>('save-action-icon', 'span'),
     playbackToggleButton: getRequiredElement<HTMLButtonElement>('playback-toggle-button', 'button'),
     playbackIconPlay: getRequiredElement<HTMLSpanElement>('playback-icon-play', 'span'),
