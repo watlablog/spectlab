@@ -173,6 +173,13 @@ interface CursorCandidate {
   distanceSec: number
 }
 
+interface FftFrequencyBounds {
+  nyquistHz: number
+  minHz: number
+  maxHz: number
+  spanHz: number
+}
+
 function routeToPath(route: AppRoute): string {
   return route === 'recording' ? RECORDING_PATH : LOGIN_PATH
 }
@@ -617,6 +624,8 @@ export function bootstrapApp(): void {
   let fftLastRefreshAtMs = 0
   let fftProfileState: FftProfileState | null = null
   let fftProfileAccumulator = new Float32Array(0)
+  let fftPlotCursorHz: number | null = null
+  let fftPlotCursorPointerId: number | null = null
   const fftCursorState: FftCursorState = {
     mode: 'single',
     singleSec: FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC,
@@ -844,15 +853,32 @@ export function bootstrapApp(): void {
     }
   }
 
+  const getFftFrequencyBounds = (state: AppState): FftFrequencyBounds => {
+    const nyquistHz = Math.max(1, timelineSyncState.sampleRateHz / 2)
+    const minHz = clamp(state.frequencyMinHz, FFT_PANEL_DOMAIN_MIN_HZ, nyquistHz)
+    const maxHz = clamp(state.frequencyMaxHz, minHz + MIN_RANGE_GAP_HZ, nyquistHz)
+    return {
+      nyquistHz,
+      minHz,
+      maxHz,
+      spanHz: Math.max(MIN_RANGE_GAP_HZ, maxHz - minHz),
+    }
+  }
+
+  const clampFftPlotCursorHz = (state: AppState): void => {
+    if (fftPlotCursorHz === null) {
+      return
+    }
+    const bounds = getFftFrequencyBounds(state)
+    fftPlotCursorHz = clamp(fftPlotCursorHz, bounds.minHz, bounds.maxHz)
+  }
+
   const renderFftPanel = (state: AppState): void => {
     const metrics = resizeFftCanvas()
     const { plotX, plotY, plotWidth, plotHeight, canvasWidth, canvasHeight } = metrics
     const minDb = state.decibelMin
     const maxDb = state.decibelMax
-    const nyquistHz = Math.max(1, timelineSyncState.sampleRateHz / 2)
-    const freqMinHz = clamp(state.frequencyMinHz, FFT_PANEL_DOMAIN_MIN_HZ, nyquistHz)
-    const freqMaxHz = clamp(state.frequencyMaxHz, freqMinHz + MIN_RANGE_GAP_HZ, nyquistHz)
-    const freqSpan = Math.max(MIN_RANGE_GAP_HZ, freqMaxHz - freqMinHz)
+    const { nyquistHz, minHz: freqMinHz, maxHz: freqMaxHz, spanHz: freqSpan } = getFftFrequencyBounds(state)
     const dbSpan = Math.max(MIN_DECIBEL_GAP, maxDb - minDb)
 
     fftCanvasCtx.fillStyle = 'rgb(2 8 18)'
@@ -917,10 +943,6 @@ export function bootstrapApp(): void {
     }
 
     const spectrum = fftProfileState.spectrumDb
-    fftCanvasCtx.strokeStyle = 'rgb(108 214 255)'
-    fftCanvasCtx.lineWidth = 1.4
-    fftCanvasCtx.lineJoin = 'round'
-    fftCanvasCtx.lineCap = 'round'
 
     const sampleSpectrumDb = (frequencyHz: number): number => {
       if (spectrum.length <= 1) {
@@ -936,12 +958,42 @@ export function bootstrapApp(): void {
       return lowerDb + (upperDb - lowerDb) * blend
     }
 
-    fftCanvasCtx.beginPath()
-    let smoothedDb = sampleSpectrumDb(freqMinHz)
+    const plotDbSeries = new Float32Array(plotWidth)
+    let peakDb = sampleSpectrumDb(freqMinHz)
+    let peakHz = freqMinHz
+    let peakX = 0
     for (let x = 0; x < plotWidth; x += 1) {
       const ratio = x / Math.max(plotWidth - 1, 1)
       const freqHz = freqMinHz + ratio * freqSpan
       const rawDb = sampleSpectrumDb(freqHz)
+      plotDbSeries[x] = rawDb
+      if (x === 0 || rawDb > peakDb) {
+        peakDb = rawDb
+        peakHz = freqHz
+        peakX = x
+      }
+    }
+
+    if (state.isRecording) {
+      fftPlotCursorHz = peakHz
+    } else if (fftPlotCursorHz === null) {
+      fftPlotCursorHz = freqMaxHz
+    }
+    clampFftPlotCursorHz(state)
+
+    const cursorHz = clamp(fftPlotCursorHz ?? freqMaxHz, freqMinHz, freqMaxHz)
+    const cursorRatio = clamp((cursorHz - freqMinHz) / freqSpan, 0, 1)
+    const cursorX = plotX + cursorRatio * plotWidth
+    const cursorDb = sampleSpectrumDb(cursorHz)
+
+    fftCanvasCtx.strokeStyle = 'rgb(108 214 255)'
+    fftCanvasCtx.lineWidth = 1.4
+    fftCanvasCtx.lineJoin = 'round'
+    fftCanvasCtx.lineCap = 'round'
+    fftCanvasCtx.beginPath()
+    let smoothedDb = plotDbSeries[0] ?? minDb
+    for (let x = 0; x < plotWidth; x += 1) {
+      const rawDb = plotDbSeries[x] ?? minDb
       smoothedDb += (rawDb - smoothedDb) * FFT_RENDER_SMOOTH_ALPHA
       const yRatio = clamp((maxDb - smoothedDb) / dbSpan, 0, 1)
       const y = plotY + yRatio * plotHeight
@@ -953,6 +1005,46 @@ export function bootstrapApp(): void {
       }
     }
     fftCanvasCtx.stroke()
+
+    const labelHz = state.isRecording ? peakHz : cursorHz
+    const labelDb = state.isRecording ? peakDb : cursorDb
+    const labelPrefix = state.isRecording ? 'Peak' : 'Cursor'
+    const labelText = `${labelPrefix}: ${fftNumberFormatter.format(Math.round(labelHz))} Hz, ${labelDb.toFixed(1)} dB`
+
+    const displayCursorX = state.isRecording ? plotX + peakX : cursorX
+    const displayCursorDb = state.isRecording ? peakDb : cursorDb
+    const displayCursorYRatio = clamp((maxDb - displayCursorDb) / dbSpan, 0, 1)
+    const displayCursorY = plotY + displayCursorYRatio * plotHeight
+    fftCanvasCtx.strokeStyle = 'rgba(255, 199, 82, 0.95)'
+    fftCanvasCtx.lineWidth = 1.2
+    fftCanvasCtx.beginPath()
+    fftCanvasCtx.moveTo(displayCursorX + 0.5, plotY + 0.5)
+    fftCanvasCtx.lineTo(displayCursorX + 0.5, plotY + plotHeight + 0.5)
+    fftCanvasCtx.stroke()
+
+    fftCanvasCtx.fillStyle = 'rgba(255, 199, 82, 0.95)'
+    fftCanvasCtx.beginPath()
+    fftCanvasCtx.arc(displayCursorX, displayCursorY, 2.6, 0, Math.PI * 2)
+    fftCanvasCtx.fill()
+
+    fftCanvasCtx.font = '11px "Avenir Next", "Yu Gothic", sans-serif'
+    fftCanvasCtx.textAlign = 'right'
+    fftCanvasCtx.textBaseline = 'top'
+    const textWidth = fftCanvasCtx.measureText(labelText).width
+    const labelPaddingX = 6
+    const labelPaddingY = 4
+    const labelHeight = 16
+    const labelRight = plotX + plotWidth - 6
+    const labelTop = plotY + 6
+    fftCanvasCtx.fillStyle = 'rgba(6, 17, 31, 0.78)'
+    fftCanvasCtx.fillRect(
+      labelRight - textWidth - labelPaddingX * 2,
+      labelTop - 1,
+      textWidth + labelPaddingX * 2,
+      labelHeight,
+    )
+    fftCanvasCtx.fillStyle = 'rgb(244 248 255)'
+    fftCanvasCtx.fillText(labelText, labelRight - labelPaddingX, labelTop + labelPaddingY - 1)
   }
 
   const updateCursorOverlay = (state: AppState): void => {
@@ -3343,6 +3435,68 @@ export function bootstrapApp(): void {
     scheduleFftProfileRefresh(true, true)
   }
 
+  const resolveFftPlotCursorFrequencyFromPointer = (event: PointerEvent, state: AppState): number | null => {
+    const metrics = resizeFftCanvas()
+    const rect = elements.fftCanvas.getBoundingClientRect()
+    if (metrics.plotWidth <= 0 || rect.width <= 0) {
+      return null
+    }
+
+    const pointerX = resolveCanvasPointerX(event.clientX, rect, metrics.dpr)
+    const ratio = clamp((pointerX - metrics.plotX) / metrics.plotWidth, 0, 1)
+    const bounds = getFftFrequencyBounds(state)
+    return bounds.minHz + ratio * bounds.spanHz
+  }
+
+  const beginFftPlotCursorDrag = (event: PointerEvent): void => {
+    const state = stateStore.getState()
+    if (!canAccessApp(state) || state.isLoadingFile || state.isRecording) {
+      return
+    }
+
+    const nextHz = resolveFftPlotCursorFrequencyFromPointer(event, state)
+    if (nextHz === null) {
+      return
+    }
+
+    fftPlotCursorHz = nextHz
+    fftPlotCursorPointerId = event.pointerId
+    elements.fftCanvas.setPointerCapture(event.pointerId)
+    renderFftPanel(state)
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  const applyFftPlotCursorDrag = (event: PointerEvent): void => {
+    if (fftPlotCursorPointerId !== event.pointerId) {
+      return
+    }
+
+    const state = stateStore.getState()
+    if (state.isRecording) {
+      return
+    }
+
+    const nextHz = resolveFftPlotCursorFrequencyFromPointer(event, state)
+    if (nextHz === null) {
+      return
+    }
+
+    fftPlotCursorHz = nextHz
+    renderFftPanel(state)
+  }
+
+  const endFftPlotCursorDrag = (event: PointerEvent): void => {
+    if (fftPlotCursorPointerId !== event.pointerId) {
+      return
+    }
+
+    fftPlotCursorPointerId = null
+    if (elements.fftCanvas.hasPointerCapture(event.pointerId)) {
+      elements.fftCanvas.releasePointerCapture(event.pointerId)
+    }
+  }
+
   elements.fftAverageToggleButton.addEventListener('click', () => {
     const state = stateStore.getState()
     if (!canAccessApp(state)) {
@@ -3363,6 +3517,18 @@ export function bootstrapApp(): void {
   })
   elements.canvas.addEventListener('pointerup', endFftCursorDrag)
   elements.canvas.addEventListener('pointercancel', endFftCursorDrag)
+  elements.fftCanvas.addEventListener('pointerdown', (event) => {
+    beginFftPlotCursorDrag(event)
+  })
+  elements.fftCanvas.addEventListener('pointermove', (event) => {
+    if (fftPlotCursorPointerId !== event.pointerId) {
+      return
+    }
+    event.preventDefault()
+    applyFftPlotCursorDrag(event)
+  })
+  elements.fftCanvas.addEventListener('pointerup', endFftPlotCursorDrag)
+  elements.fftCanvas.addEventListener('pointercancel', endFftPlotCursorDrag)
 
   elements.loadAudioButton.addEventListener('click', () => {
     const state = stateStore.getState()
