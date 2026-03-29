@@ -3,6 +3,7 @@ export type FrameSize = 512 | 1024 | 2048 | 4096 | 8192
 export type UpperFrequencyHz = 5000 | 10000 | 20000
 
 export interface AppState {
+  authEnabled: boolean
   authStatus: AuthStatus
   userName: string | null
   analysisSource: 'live' | 'file'

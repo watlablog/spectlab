@@ -1,22 +1,26 @@
 import type { AppState } from '../app/types'
 import type { UIElements } from './dom'
 
-export function renderControlsView(elements: UIElements, state: AppState, hasSavableAudio: boolean): void {
-  const isSignedIn = state.authStatus === 'signed-in'
+export function renderControlsView(
+  elements: UIElements,
+  state: AppState,
+  hasSavableAudio: boolean,
+  canAccessApp: boolean,
+): void {
   const isBusy = state.isSavingAudio || state.isLoadingFile
-  elements.startButton.disabled = !isSignedIn || state.isPlayingBack || isBusy
+  elements.startButton.disabled = !canAccessApp || state.isPlayingBack || isBusy
   elements.startButton.classList.toggle('is-recording', state.isRecording)
   elements.startButton.setAttribute('aria-label', state.isRecording ? 'Stop recording' : 'Start recording')
-  elements.playbackToggleButton.disabled = !isSignedIn || state.isRecording || isBusy || !hasSavableAudio
-  elements.clearButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
-  elements.loadAudioButton.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
+  elements.playbackToggleButton.disabled = !canAccessApp || state.isRecording || isBusy || !hasSavableAudio
+  elements.clearButton.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
+  elements.loadAudioButton.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
   elements.saveButton.disabled =
-    !isSignedIn || state.isRecording || state.isPlayingBack || isBusy || !hasSavableAudio
-  elements.frameSizeSelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
-  elements.overlapInput.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
-  elements.upperFrequencySelect.disabled = !isSignedIn || state.isRecording || state.isPlayingBack || isBusy
+    !canAccessApp || state.isRecording || state.isPlayingBack || isBusy || !hasSavableAudio
+  elements.frameSizeSelect.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
+  elements.overlapInput.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
+  elements.upperFrequencySelect.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
 
-  if (!isSignedIn) {
+  if (!canAccessApp) {
     elements.micStatus.textContent = 'ログイン後に利用できます。'
     return
   }

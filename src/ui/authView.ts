@@ -1,10 +1,26 @@
 import type { AppState } from '../app/types'
 import type { UIElements } from './dom'
 
-export function renderAuthView(elements: UIElements, state: AppState, authEnabled: boolean): void {
+export function renderAuthView(
+  elements: UIElements,
+  state: AppState,
+  authEnabled: boolean,
+  authServiceEnabled: boolean,
+  canAccessApp: boolean,
+): void {
+  if (!authEnabled) {
+    elements.loginButton.hidden = true
+    elements.logoutButton.hidden = true
+    elements.userName.hidden = true
+    return
+  }
+
+  elements.loginButton.hidden = false
+  elements.logoutButton.hidden = false
+  elements.userName.hidden = false
   elements.loginButton.textContent = 'Googleでログイン'
 
-  if (!authEnabled) {
+  if (!authServiceEnabled) {
     elements.loginButton.textContent = 'ログイン不可'
     elements.userName.textContent = '未ログイン'
     elements.loginButton.disabled = true
@@ -20,7 +36,7 @@ export function renderAuthView(elements: UIElements, state: AppState, authEnable
     return
   }
 
-  if (state.authStatus === 'signed-in') {
+  if (canAccessApp) {
     elements.userName.textContent = state.userName ?? 'ユーザー情報なし'
     elements.loginButton.disabled = true
     elements.logoutButton.disabled = false

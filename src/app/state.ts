@@ -1,6 +1,7 @@
 import type { AppState, StateSubscriber } from './types'
 
 const DEFAULT_STATE: AppState = {
+  authEnabled: false,
   authStatus: 'loading',
   userName: null,
   analysisSource: 'live',

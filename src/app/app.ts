@@ -181,6 +181,15 @@ function routeFromPath(pathname: string): AppRoute {
   return pathname === RECORDING_PATH ? 'recording' : 'login'
 }
 
+function parseEnableAuthFlag(value: string | undefined): boolean {
+  if (typeof value !== 'string') {
+    return false
+  }
+
+  const normalized = value.trim().toLowerCase()
+  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on'
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
 }
@@ -511,7 +520,11 @@ function buildAudioFilename(now: Date, timeMinSec: number, timeMaxSec: number): 
 
 export function bootstrapApp(): void {
   const elements = getUIElements()
+  const authEnabled = parseEnableAuthFlag(import.meta.env.VITE_ENABLE_AUTH)
   const stateStore = createAppStateStore({
+    authEnabled,
+    authStatus: authEnabled ? 'loading' : 'signed-in',
+    userName: authEnabled ? null : 'Guest',
     analysisSource: 'live',
     isLoadingFile: false,
     loadedAudioName: null,
@@ -1083,7 +1096,22 @@ export function bootstrapApp(): void {
     updateRouteVisibility(route)
   }
 
+  const canAccessApp = (state: AppState): boolean => !state.authEnabled || state.authStatus === 'signed-in'
+  const ensureAppAccess = (state: AppState, errorMessage = '先にGoogleログインしてください。'): boolean => {
+    if (canAccessApp(state)) {
+      return true
+    }
+    stateStore.setState({ errorMessage })
+    return false
+  }
+
   const syncRouteByState = (state: AppState): void => {
+    if (!state.authEnabled) {
+      navigateToRoute('recording', 'replace')
+      lastAuthStatus = state.authStatus
+      return
+    }
+
     if (state.authStatus === 'loading') {
       updateRouteVisibility('login')
       lastAuthStatus = state.authStatus
@@ -1562,8 +1590,7 @@ export function bootstrapApp(): void {
   }
 
   const renderDecibelControls = (state: AppState): void => {
-    const isSignedIn = state.authStatus === 'signed-in'
-    const isLocked = !isSignedIn || state.isLoadingFile || (conservativeMode && state.isRecording)
+    const isLocked = !canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)
     elements.dbMinInput.disabled = isLocked
     elements.dbMaxInput.disabled = isLocked
     elements.dbHandleMin.disabled = isLocked
@@ -1597,8 +1624,7 @@ export function bootstrapApp(): void {
   }
 
   const renderFrequencyControls = (state: AppState): void => {
-    const isSignedIn = state.authStatus === 'signed-in'
-    const isLocked = !isSignedIn || state.isLoadingFile || (conservativeMode && state.isRecording)
+    const isLocked = !canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)
     elements.freqMinInput.disabled = isLocked
     elements.freqMaxInput.disabled = isLocked
     elements.freqHandleMin.disabled = isLocked
@@ -1641,8 +1667,8 @@ export function bootstrapApp(): void {
   }
 
   const renderTimeControls = (state: AppState): void => {
-    const isSignedIn = state.authStatus === 'signed-in'
-    const lockTimeRange = !isSignedIn || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode
+    const lockTimeRange =
+      !canAccessApp(state) || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode
     elements.timeMinInput.disabled = lockTimeRange
     elements.timeMaxInput.disabled = lockTimeRange
     elements.timeHandleMin.disabled = lockTimeRange
@@ -2097,9 +2123,8 @@ export function bootstrapApp(): void {
   }
 
   const renderPlaybackWidget = (state: AppState, hasSavableAudio: boolean): void => {
-    const isSignedIn = state.authStatus === 'signed-in'
     const canTogglePlayback =
-      isSignedIn && !state.isRecording && !state.isSavingAudio && !state.isLoadingFile && hasSavableAudio
+      canAccessApp(state) && !state.isRecording && !state.isSavingAudio && !state.isLoadingFile && hasSavableAudio
     elements.playbackToggleButton.disabled = !canTogglePlayback
     elements.playbackToggleButton.classList.toggle('is-playing', state.isPlayingBack)
     elements.playbackToggleButton.setAttribute('aria-label', state.isPlayingBack ? 'Stop playback' : 'Play visible range')
@@ -2463,8 +2488,7 @@ export function bootstrapApp(): void {
 
   const loadLocalAudioFile = async (file: File): Promise<void> => {
     const currentState = stateStore.getState()
-    if (currentState.authStatus !== 'signed-in') {
-      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+    if (!ensureAppAccess(currentState)) {
       return
     }
     if (currentState.isRecording || currentState.isPlayingBack || currentState.isSavingAudio || currentState.isLoadingFile) {
@@ -2686,8 +2710,12 @@ export function bootstrapApp(): void {
     frameId = requestAnimationFrame(drawFrame)
   }
 
-  const firebaseConfig = getFirebaseConfig()
   const authService = (() => {
+    if (!authEnabled) {
+      return createAuthService(null)
+    }
+
+    const firebaseConfig = getFirebaseConfig()
     if (!firebaseConfig.config) {
       stateStore.setState({
         authStatus: 'signed-out',
@@ -2714,9 +2742,10 @@ export function bootstrapApp(): void {
       applyQualityProfile(false, false)
     }
 
+    const accessGranted = canAccessApp(state)
     const hasSavableAudio = hasSavableAudioData()
-    renderAuthView(elements, state, authService.isEnabled)
-    renderControlsView(elements, state, hasSavableAudio)
+    renderAuthView(elements, state, state.authEnabled, authService.isEnabled, accessGranted)
+    renderControlsView(elements, state, hasSavableAudio, accessGranted)
     renderPlaybackWidget(state, hasSavableAudio)
     elements.analysisMetrics.textContent = formatAnalysisMetricsText(
       Math.max(1, state.currentSampleRateHz ?? timelineSyncState.sampleRateHz),
@@ -2728,7 +2757,7 @@ export function bootstrapApp(): void {
     renderTimeControls(state)
     renderDecibelTicks(state.decibelMin, state.decibelMax)
     updateAxisConfig(state)
-    elements.fftAverageToggleButton.disabled = state.authStatus !== 'signed-in'
+    elements.fftAverageToggleButton.disabled = !accessGranted
     elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
 
     const frequencyRangeChanged =
@@ -2910,7 +2939,7 @@ export function bootstrapApp(): void {
 
   const beginFrequencySliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in' || state.isLoadingFile || (conservativeMode && state.isRecording)) {
+    if (!canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -2974,7 +3003,7 @@ export function bootstrapApp(): void {
 
   const beginDecibelSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in' || state.isLoadingFile || (conservativeMode && state.isRecording)) {
+    if (!canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -3038,7 +3067,7 @@ export function bootstrapApp(): void {
 
   const beginTimeSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in' || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode) {
+    if (!canAccessApp(state) || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode) {
       return
     }
 
@@ -3254,7 +3283,7 @@ export function bootstrapApp(): void {
 
   const beginFftCursorDrag = (event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in' || state.isLoadingFile) {
+    if (!canAccessApp(state) || state.isLoadingFile) {
       return
     }
 
@@ -3316,7 +3345,7 @@ export function bootstrapApp(): void {
 
   elements.fftAverageToggleButton.addEventListener('click', () => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
+    if (!canAccessApp(state)) {
       return
     }
     toggleAverageFftMode(fftCursorState.mode !== 'average')
@@ -3337,8 +3366,7 @@ export function bootstrapApp(): void {
 
   elements.loadAudioButton.addEventListener('click', () => {
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
-      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+    if (!ensureAppAccess(state)) {
       return
     }
     if (state.isRecording || state.isPlayingBack || state.isSavingAudio || state.isLoadingFile) {
@@ -3363,10 +3391,7 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
-      stateStore.setState({
-        errorMessage: '先にGoogleログインしてください。',
-      })
+    if (!ensureAppAccess(state)) {
       return
     }
 
@@ -3461,8 +3486,7 @@ export function bootstrapApp(): void {
   elements.clearButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
-      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+    if (!ensureAppAccess(state)) {
       return
     }
 
@@ -3484,8 +3508,7 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
-      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+    if (!ensureAppAccess(state)) {
       return
     }
 
@@ -3512,8 +3535,7 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (state.authStatus !== 'signed-in') {
-      stateStore.setState({ errorMessage: '先にGoogleログインしてください。' })
+    if (!ensureAppAccess(state)) {
       return
     }
 
@@ -3539,6 +3561,10 @@ export function bootstrapApp(): void {
   elements.loginButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
 
+    if (!stateStore.getState().authEnabled) {
+      return
+    }
+
     if (!authService.isEnabled) {
       stateStore.setState({ errorMessage: 'Firebase認証が未設定です。' })
       return
@@ -3556,6 +3582,10 @@ export function bootstrapApp(): void {
   elements.logoutButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
 
+    if (!stateStore.getState().authEnabled) {
+      return
+    }
+
     try {
       await stopVisualization()
       await stopPlayback()
@@ -3569,7 +3599,7 @@ export function bootstrapApp(): void {
 
   window.addEventListener('popstate', () => {
     const state = stateStore.getState()
-    const desiredRoute: AppRoute = state.authStatus === 'signed-in' ? 'recording' : 'login'
+    const desiredRoute: AppRoute = canAccessApp(state) ? 'recording' : 'login'
     if (routeFromPath(window.location.pathname) !== desiredRoute) {
       navigateToRoute(desiredRoute, 'replace')
     }
