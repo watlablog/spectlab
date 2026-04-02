@@ -38,7 +38,7 @@ body {
   width: min(1120px, 94vw);
   margin: 0 auto;
   min-height: 100vh;
-  padding: 1.2rem 0 5.8rem;
+  padding: 1.2rem 0 2rem;
 }
 
 .panel {
@@ -73,7 +73,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1rem;
-  padding-bottom: 4.2rem;
+  padding-bottom: 0;
 }
 
 .app-title {
@@ -191,6 +191,17 @@ body {
   padding: 0.7rem 0.9rem;
   background: rgba(98, 15, 15, 0.45);
   color: var(--error);
+}
+
+.error-top-popup {
+  position: fixed;
+  top: max(10px, calc(env(safe-area-inset-top) + 8px));
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, 92vw);
+  margin: 0;
+  z-index: 60;
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.35);
 }
 
 .canvas-panel {
@@ -721,17 +732,13 @@ body {
 }
 
 .account-dock {
-  position: fixed;
-  left: 50%;
-  bottom: 0.85rem;
-  transform: translateX(-50%);
-  width: min(1120px, 94vw);
+  width: 100%;
   padding: 0.65rem 0.9rem;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: flex-start;
   gap: 0.8rem;
-  z-index: 20;
 }
 
 .account-info {
@@ -753,6 +760,14 @@ body {
 
 .account-dock .user-name {
   margin: 0;
+}
+
+.privacy-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  line-height: 1.35;
+  max-width: 100%;
 }
 
 @media (max-width: 960px) {
@@ -816,12 +831,23 @@ body {
   }
 
   .account-dock {
-    bottom: 0.55rem;
     padding: 0.55rem 0.7rem;
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .analysis-metrics {
     font-size: 0.68rem;
     white-space: normal;
+  }
+
+  .privacy-note {
+    font-size: 0.62rem;
+    max-width: 100%;
+  }
+
+  .error-top-popup {
+    width: 94vw;
+    padding: 0.62rem 0.75rem;
   }
 }

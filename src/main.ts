@@ -8,6 +8,9 @@ try {
   const message = toErrorMessage(error, 'アプリの初期化に失敗しました。')
   const root = document.getElementById('app')
   if (root) {
-    root.innerHTML = `<p class=\"error\">${message}</p>`
+    const errorElement = document.createElement('p')
+    errorElement.className = 'error'
+    errorElement.textContent = message
+    root.replaceChildren(errorElement)
   }
 }

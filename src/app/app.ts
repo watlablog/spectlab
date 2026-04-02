@@ -62,9 +62,11 @@ const FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC = 10
 const FFT_PROFILE_REFRESH_INTERVAL_MS = 50
 const CURSOR_NEAR_TAP_THRESHOLD_DESKTOP_PX = 20
 const CURSOR_NEAR_TAP_THRESHOLD_MOBILE_PX = 28
-const FFT_RENDER_SMOOTH_ALPHA = 0.35
+const FFT_CURVE_TENSION = 1
 const FILE_RENDER_THROTTLE_MS = 100
 const MAX_FILE_DURATION_SECONDS = 30 * 60
+const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
+const NO_REAL_DATA_RANGE_MESSAGE = '選択範囲に実データがありません。'
 
 interface QualityProfile {
   renderFps: number
@@ -137,6 +139,15 @@ interface DisplayedAudioSlice {
   endSample: number
 }
 
+interface LiveDataWindow {
+  hasData: boolean
+  dataStartSample: number
+  dataEndSample: number
+  dataStartSec: number
+  dataEndSec: number
+  capturedDurationSec: number
+}
+
 interface DecodedAudioFile {
   samples: Float32Array
   sampleRateHz: number
@@ -199,6 +210,54 @@ function parseEnableAuthFlag(value: string | undefined): boolean {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+function traceCatmullRomThroughPoints(
+  context: CanvasRenderingContext2D,
+  startX: number,
+  stepX: number,
+  yValues: Float32Array,
+): void {
+  const pointCount = yValues.length
+  if (pointCount <= 0) {
+    return
+  }
+
+  const tension = clamp(FFT_CURVE_TENSION, 0, 1)
+  context.beginPath()
+  context.moveTo(startX, yValues[0] ?? 0)
+
+  if (pointCount === 1) {
+    return
+  }
+
+  if (pointCount === 2) {
+    context.lineTo(startX + stepX, yValues[1] ?? yValues[0] ?? 0)
+    return
+  }
+
+  for (let index = 0; index < pointCount - 1; index += 1) {
+    const prevIndex = Math.max(0, index - 1)
+    const nextIndex = index + 1
+    const nextNextIndex = Math.min(pointCount - 1, index + 2)
+
+    const x0 = startX + prevIndex * stepX
+    const x1 = startX + index * stepX
+    const x2 = startX + nextIndex * stepX
+    const x3 = startX + nextNextIndex * stepX
+
+    const y0 = yValues[prevIndex] ?? yValues[index] ?? 0
+    const y1 = yValues[index] ?? 0
+    const y2 = yValues[nextIndex] ?? y1
+    const y3 = yValues[nextNextIndex] ?? y2
+
+    const control1X = x1 + ((x2 - x0) * tension) / 6
+    const control1Y = y1 + ((y2 - y0) * tension) / 6
+    const control2X = x2 - ((x3 - x1) * tension) / 6
+    const control2Y = y2 - ((y3 - y1) * tension) / 6
+
+    context.bezierCurveTo(control1X, control1Y, control2X, control2Y, x2, y2)
+  }
 }
 
 function isMobileViewport(): boolean {
@@ -659,6 +718,90 @@ export function bootstrapApp(): void {
     return clamp(seconds, state.timeDomainMinSec, state.timeDomainMaxSec)
   }
 
+  const getLiveDataWindow = (): LiveDataWindow => {
+    const sampleRateHz = Math.max(1, timelineSyncState.sampleRateHz)
+    const windowSamples = Math.max(0, latestPcmWindow48k.length)
+    const capturedSamples = clamp(
+      Math.min(windowSamples, Math.floor(latestCapturedSamples48k)),
+      0,
+      windowSamples,
+    )
+    const hasData = windowSamples > 0 && capturedSamples > 0
+    const dataEndSample = windowSamples
+    const dataStartSample = Math.max(0, dataEndSample - capturedSamples)
+
+    return {
+      hasData,
+      dataStartSample,
+      dataEndSample,
+      dataStartSec: dataStartSample / sampleRateHz,
+      dataEndSec: dataEndSample / sampleRateHz,
+      capturedDurationSec: capturedSamples / sampleRateHz,
+    }
+  }
+
+  const getSpectrogramCursorBoundsSec = (
+    state: AppState,
+  ): { hasData: boolean; minSec: number; maxSec: number } => {
+    if (state.analysisSource !== 'live') {
+      return {
+        hasData: true,
+        minSec: state.timeDomainMinSec,
+        maxSec: state.timeDomainMaxSec,
+      }
+    }
+
+    const liveDataWindow = getLiveDataWindow()
+    if (!liveDataWindow.hasData) {
+      return {
+        hasData: false,
+        minSec: state.timeDomainMinSec,
+        maxSec: state.timeDomainMinSec,
+      }
+    }
+
+    const minSec = clamp(liveDataWindow.dataStartSec, state.timeDomainMinSec, state.timeDomainMaxSec)
+    const maxSec = clamp(liveDataWindow.dataEndSec, minSec, state.timeDomainMaxSec)
+    return {
+      hasData: maxSec > minSec,
+      minSec,
+      maxSec,
+    }
+  }
+
+  const clampSpectrogramCursorSecToLiveData = (seconds: number, state: AppState): number => {
+    const bounds = getSpectrogramCursorBoundsSec(state)
+    if (!bounds.hasData) {
+      return clampCursorSeconds(seconds, state)
+    }
+    return clamp(seconds, bounds.minSec, bounds.maxSec)
+  }
+
+  const intersectSelectionWithLiveData = (
+    selectionStartSample: number,
+    selectionEndSample: number,
+    liveWindow: LiveDataWindow,
+  ): { start: number; end: number } | null => {
+    if (!liveWindow.hasData) {
+      return null
+    }
+
+    const start = Math.max(selectionStartSample, liveWindow.dataStartSample)
+    const end = Math.min(selectionEndSample, liveWindow.dataEndSample)
+    if (end <= start) {
+      return null
+    }
+
+    return { start, end }
+  }
+
+  const clampFftCursorsToActiveDomain = (): void => {
+    const state = stateStore.getState()
+    fftCursorState.singleSec = clampSpectrogramCursorSecToLiveData(fftCursorState.singleSec, state)
+    fftCursorState.rangeMinSec = clampSpectrogramCursorSecToLiveData(fftCursorState.rangeMinSec, state)
+    fftCursorState.rangeMaxSec = clampSpectrogramCursorSecToLiveData(fftCursorState.rangeMaxSec, state)
+  }
+
   const showFallbackNoticeIfNeeded = (minRangeSec: number, reasonKey: string, allowNotice: boolean): void => {
     if (!allowNotice) {
       return
@@ -682,10 +825,19 @@ export function bootstrapApp(): void {
     singleSec: number,
     minimumRangeSec: number,
   ): { minSec: number; maxSec: number; impossible: boolean } => {
-    const safeSingleSec = clampCursorSeconds(singleSec, state)
-    const domainMinSec = state.timeDomainMinSec
-    const domainMaxSec = state.timeDomainMaxSec
-    const domainSpanSec = getTimeDomainSpanSec(state)
+    const cursorBounds = getSpectrogramCursorBoundsSec(state)
+    const safeSingleSec = clampSpectrogramCursorSecToLiveData(singleSec, state)
+    if (!cursorBounds.hasData) {
+      return {
+        minSec: safeSingleSec,
+        maxSec: safeSingleSec,
+        impossible: true,
+      }
+    }
+
+    const domainMinSec = cursorBounds.minSec
+    const domainMaxSec = cursorBounds.maxSec
+    const domainSpanSec = Math.max(0, domainMaxSec - domainMinSec)
     if (!Number.isFinite(minimumRangeSec) || minimumRangeSec > domainSpanSec) {
       return {
         minSec: safeSingleSec,
@@ -705,8 +857,8 @@ export function bootstrapApp(): void {
       minSec -= maxSec - domainMaxSec
       maxSec = domainMaxSec
     }
-    minSec = clampCursorSeconds(minSec, state)
-    maxSec = clampCursorSeconds(maxSec, state)
+    minSec = clampSpectrogramCursorSecToLiveData(minSec, state)
+    maxSec = clampSpectrogramCursorSecToLiveData(maxSec, state)
     return {
       minSec,
       maxSec,
@@ -720,7 +872,7 @@ export function bootstrapApp(): void {
       return 0
     }
     const domainSpanSec = getTimeDomainSpanSec(state)
-    const safeSec = clampCursorSeconds(seconds, state) - state.timeDomainMinSec
+    const safeSec = clampSpectrogramCursorSecToLiveData(seconds, state) - state.timeDomainMinSec
     const ratio = safeSec / domainSpanSec
     return clamp(Math.round(ratio * (capacity - 1)), 0, capacity - 1)
   }
@@ -800,7 +952,7 @@ export function bootstrapApp(): void {
     }
 
     if (widthSec <= 0) {
-      const centerSec = clampCursorSeconds((minSec + maxSec) / 2, state)
+      const centerSec = clampSpectrogramCursorSecToLiveData((minSec + maxSec) / 2, state)
       const timelineIndex = resolveTimelineIndexForAbsoluteSec(state, centerSec)
       let spectrum = new Float32Array(frequencyHistoryRing.bins)
       withHistoryColumn(timelineIndex, (column) => {
@@ -958,7 +1110,7 @@ export function bootstrapApp(): void {
       return lowerDb + (upperDb - lowerDb) * blend
     }
 
-    const plotDbSeries = new Float32Array(plotWidth)
+    const plotYSeries = new Float32Array(plotWidth)
     let peakDb = sampleSpectrumDb(freqMinHz)
     let peakHz = freqMinHz
     let peakX = 0
@@ -966,7 +1118,8 @@ export function bootstrapApp(): void {
       const ratio = x / Math.max(plotWidth - 1, 1)
       const freqHz = freqMinHz + ratio * freqSpan
       const rawDb = sampleSpectrumDb(freqHz)
-      plotDbSeries[x] = rawDb
+      const yRatio = clamp((maxDb - rawDb) / dbSpan, 0, 1)
+      plotYSeries[x] = plotY + yRatio * plotHeight
       if (x === 0 || rawDb > peakDb) {
         peakDb = rawDb
         peakHz = freqHz
@@ -990,21 +1143,13 @@ export function bootstrapApp(): void {
     fftCanvasCtx.lineWidth = 1.4
     fftCanvasCtx.lineJoin = 'round'
     fftCanvasCtx.lineCap = 'round'
+    fftCanvasCtx.save()
     fftCanvasCtx.beginPath()
-    let smoothedDb = plotDbSeries[0] ?? minDb
-    for (let x = 0; x < plotWidth; x += 1) {
-      const rawDb = plotDbSeries[x] ?? minDb
-      smoothedDb += (rawDb - smoothedDb) * FFT_RENDER_SMOOTH_ALPHA
-      const yRatio = clamp((maxDb - smoothedDb) / dbSpan, 0, 1)
-      const y = plotY + yRatio * plotHeight
-      const canvasX = plotX + x
-      if (x === 0) {
-        fftCanvasCtx.moveTo(canvasX, y)
-      } else {
-        fftCanvasCtx.lineTo(canvasX, y)
-      }
-    }
+    fftCanvasCtx.rect(plotX, plotY, plotWidth, plotHeight)
+    fftCanvasCtx.clip()
+    traceCatmullRomThroughPoints(fftCanvasCtx, plotX, 1, plotYSeries)
     fftCanvasCtx.stroke()
+    fftCanvasCtx.restore()
 
     const labelHz = state.isRecording ? peakHz : cursorHz
     const labelDb = state.isRecording ? peakDb : cursorDb
@@ -1476,6 +1621,7 @@ export function bootstrapApp(): void {
       timelineSyncState.sampleRateHz = snapshot.sampleRateHz
       timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
       setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
+      clampFftCursorsToActiveDomain()
       requestHistoryRender()
       scheduleFftProfileRefresh(true, false)
     } catch (error) {
@@ -2276,7 +2422,8 @@ export function bootstrapApp(): void {
       }
     }
 
-    if (latestPcmWindow48k.length <= 0 || latestCapturedSamples48k <= 0) {
+    const liveDataWindow = getLiveDataWindow()
+    if (!liveDataWindow.hasData || latestPcmWindow48k.length <= 0 || latestCapturedSamples48k <= 0) {
       return null
     }
 
@@ -2299,7 +2446,12 @@ export function bootstrapApp(): void {
       startSample + 1,
       windowSamples,
     )
-    const samples = latestPcmWindow48k.subarray(startSample, endSample)
+    const selectedRange = intersectSelectionWithLiveData(startSample, endSample, liveDataWindow)
+    if (!selectedRange) {
+      return null
+    }
+
+    const samples = latestPcmWindow48k.subarray(selectedRange.start, selectedRange.end)
     if (samples.length <= 0) {
       return null
     }
@@ -2307,8 +2459,8 @@ export function bootstrapApp(): void {
     return {
       samples,
       sampleRateHz: timelineSyncState.sampleRateHz,
-      startSample,
-      endSample,
+      startSample: selectedRange.start,
+      endSample: selectedRange.end,
     }
   }
 
@@ -2356,7 +2508,12 @@ export function bootstrapApp(): void {
 
     const displayedSlice = await resolveDisplayedAudioSlice(state)
     if (!displayedSlice) {
-      stateStore.setState({ errorMessage: '再生可能な録音データがありません。' })
+      stateStore.setState({
+        errorMessage:
+          state.analysisSource === 'live' && hasSavableAudioData()
+            ? NO_REAL_DATA_RANGE_MESSAGE
+            : '再生可能な録音データがありません。',
+      })
       return
     }
 
@@ -2404,7 +2561,12 @@ export function bootstrapApp(): void {
 
     const displayedSlice = await resolveDisplayedAudioSlice(state)
     if (!displayedSlice) {
-      stateStore.setState({ errorMessage: '保存可能な録音データがありません。' })
+      stateStore.setState({
+        errorMessage:
+          state.analysisSource === 'live' && hasSavableAudioData()
+            ? NO_REAL_DATA_RANGE_MESSAGE
+            : '保存可能な録音データがありません。',
+      })
       return
     }
 
@@ -2472,6 +2634,7 @@ export function bootstrapApp(): void {
     timelineSyncState.windowSamples = Math.max(1, Math.round(snapshot.sampleRateHz * SPECTROGRAM_WINDOW_SECONDS))
     timelineSyncState.capturedSamples = snapshot.capturedSamples48k
     setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
+    clampFftCursorsToActiveDomain()
     scheduleFftProfileRefresh(true, false)
   }
 
@@ -2571,13 +2734,6 @@ export function bootstrapApp(): void {
     scheduleFftProfileRefresh(true, false)
   }
 
-  const clampFftCursorsToActiveDomain = (): void => {
-    const state = stateStore.getState()
-    fftCursorState.singleSec = clampCursorSeconds(fftCursorState.singleSec, state)
-    fftCursorState.rangeMinSec = clampCursorSeconds(fftCursorState.rangeMinSec, state)
-    fftCursorState.rangeMaxSec = clampCursorSeconds(fftCursorState.rangeMaxSec, state)
-  }
-
   const loadLocalAudioFile = async (file: File): Promise<void> => {
     const currentState = stateStore.getState()
     if (!ensureAppAccess(currentState)) {
@@ -2585,6 +2741,18 @@ export function bootstrapApp(): void {
     }
     if (currentState.isRecording || currentState.isPlayingBack || currentState.isSavingAudio || currentState.isLoadingFile) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
+      return
+    }
+    if (!Number.isFinite(file.size) || file.size <= 0) {
+      stateStore.setState({ errorMessage: '有効な音声ファイルを選択してください。' })
+      elements.loadAudioInput.value = ''
+      return
+    }
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      stateStore.setState({
+        errorMessage: `読み込めるファイルサイズは ${Math.round(MAX_FILE_SIZE_BYTES / (1024 * 1024))}MB までです。`,
+      })
+      elements.loadAudioInput.value = ''
       return
     }
 
@@ -2889,9 +3057,12 @@ export function bootstrapApp(): void {
 
     const isRecordingRouteVisible = !elements.appPage.hidden
     if (state.errorMessage && isRecordingRouteVisible) {
+      const isTopPopupMessage = state.errorMessage === NO_REAL_DATA_RANGE_MESSAGE
+      elements.errorMessage.classList.toggle('error-top-popup', isTopPopupMessage)
       elements.errorMessage.hidden = false
       elements.errorMessage.textContent = state.errorMessage
     } else {
+      elements.errorMessage.classList.remove('error-top-popup')
       elements.errorMessage.hidden = true
       elements.errorMessage.textContent = ''
     }
@@ -3226,6 +3397,12 @@ export function bootstrapApp(): void {
 
   const toggleAverageFftMode = (enable: boolean): void => {
     const state = stateStore.getState()
+    const cursorBounds = getSpectrogramCursorBoundsSec(state)
+    if (!cursorBounds.hasData) {
+      stateStore.setState({ errorMessage: '実データがないためカーソル操作できません。' })
+      return
+    }
+
     if (enable) {
       const minimumRangeSec = getMinimumCursorRangeSec(state)
       const range = ensureAverageCursorRange(state, fftCursorState.singleSec, minimumRangeSec)
@@ -3239,7 +3416,10 @@ export function bootstrapApp(): void {
       return
     }
 
-    const midpointSec = clampCursorSeconds((fftCursorState.rangeMinSec + fftCursorState.rangeMaxSec) / 2, state)
+    const midpointSec = clampSpectrogramCursorSecToLiveData(
+      (fftCursorState.rangeMinSec + fftCursorState.rangeMaxSec) / 2,
+      state,
+    )
     fftCursorState.mode = 'single'
     fftCursorState.singleSec = midpointSec
     fftCursorState.lastFallbackNoticeKey = null
@@ -3259,12 +3439,12 @@ export function bootstrapApp(): void {
     pointerX: number,
   ): number => {
     if (metrics.plotWidth <= 0) {
-      return clampCursorSeconds(state.timeMinSec, state)
+      return clampSpectrogramCursorSecToLiveData(state.timeMinSec, state)
     }
 
     const ratio = clamp((pointerX - metrics.plotX) / metrics.plotWidth, 0, 1)
     const visibleSpanSec = Math.max(MIN_TIME_GAP_SEC, state.timeMaxSec - state.timeMinSec)
-    return clampCursorSeconds(state.timeMinSec + ratio * visibleSpanSec, state)
+    return clampSpectrogramCursorSecToLiveData(state.timeMinSec + ratio * visibleSpanSec, state)
   }
 
   const buildCursorCandidate = (
@@ -3339,7 +3519,7 @@ export function bootstrapApp(): void {
 
   const moveFftCursorToSec = (handle: FftCursorDragHandle, seconds: number): void => {
     const state = stateStore.getState()
-    const safeSeconds = clampCursorSeconds(seconds, state)
+    const safeSeconds = clampSpectrogramCursorSecToLiveData(seconds, state)
     if (fftCursorState.mode === 'single' || handle === 'single') {
       fftCursorState.singleSec = safeSeconds
       return
@@ -3376,6 +3556,11 @@ export function bootstrapApp(): void {
   const beginFftCursorDrag = (event: PointerEvent): void => {
     const state = stateStore.getState()
     if (!canAccessApp(state) || state.isLoadingFile) {
+      return
+    }
+    const cursorBounds = getSpectrogramCursorBoundsSec(state)
+    if (!cursorBounds.hasData) {
+      stateStore.setState({ errorMessage: '実データがないためカーソル操作できません。' })
       return
     }
 
