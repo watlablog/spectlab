@@ -1,9 +1,4 @@
 export interface UIElements {
-  loginPage: HTMLElement
-  appPage: HTMLElement
-  userName: HTMLParagraphElement
-  loginButton: HTMLButtonElement
-  logoutButton: HTMLButtonElement
   micStatus: HTMLParagraphElement
   analysisMetrics: HTMLParagraphElement
   startButton: HTMLButtonElement
@@ -53,7 +48,7 @@ export interface UIElements {
 
 function getRequiredElement<T extends HTMLElement>(
   id: string,
-  typeName: 'canvas' | 'button' | 'paragraph' | 'section' | 'div' | 'input' | 'select' | 'span',
+  typeName: 'canvas' | 'button' | 'paragraph' | 'div' | 'input' | 'select' | 'span',
 ): T {
   const element = document.getElementById(id)
 
@@ -98,11 +93,6 @@ function getRequiredElement<T extends HTMLElement>(
 
 export function getUIElements(): UIElements {
   return {
-    loginPage: getRequiredElement<HTMLElement>('login-page', 'section'),
-    appPage: getRequiredElement<HTMLElement>('app-page', 'section'),
-    userName: getRequiredElement<HTMLParagraphElement>('user-name', 'paragraph'),
-    loginButton: getRequiredElement<HTMLButtonElement>('login-button', 'button'),
-    logoutButton: getRequiredElement<HTMLButtonElement>('logout-button', 'button'),
     micStatus: getRequiredElement<HTMLParagraphElement>('mic-status', 'paragraph'),
     analysisMetrics: getRequiredElement<HTMLParagraphElement>('analysis-metrics', 'paragraph'),
     startButton: getRequiredElement<HTMLButtonElement>('start-button', 'button'),

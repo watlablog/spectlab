@@ -1,0 +1,9 @@
+RewriteEngine On
+
+# Return real files and directories as-is.
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Fallback every other request to the Vite SPA entry point.
+RewriteRule ^ index.html [L]

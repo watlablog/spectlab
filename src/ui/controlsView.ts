@@ -5,25 +5,18 @@ export function renderControlsView(
   elements: UIElements,
   state: AppState,
   hasSavableAudio: boolean,
-  canAccessApp: boolean,
 ): void {
   const isBusy = state.isSavingAudio || state.isLoadingFile
-  elements.startButton.disabled = !canAccessApp || state.isPlayingBack || isBusy
+  elements.startButton.disabled = state.isPlayingBack || isBusy
   elements.startButton.classList.toggle('is-recording', state.isRecording)
   elements.startButton.setAttribute('aria-label', state.isRecording ? 'Stop recording' : 'Start recording')
-  elements.playbackToggleButton.disabled = !canAccessApp || state.isRecording || isBusy || !hasSavableAudio
-  elements.clearButton.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
-  elements.loadAudioButton.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
-  elements.saveButton.disabled =
-    !canAccessApp || state.isRecording || state.isPlayingBack || isBusy || !hasSavableAudio
-  elements.frameSizeSelect.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
-  elements.overlapInput.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
-  elements.upperFrequencySelect.disabled = !canAccessApp || state.isRecording || state.isPlayingBack || isBusy
-
-  if (!canAccessApp) {
-    elements.micStatus.textContent = 'ログイン後に利用できます。'
-    return
-  }
+  elements.playbackToggleButton.disabled = state.isRecording || isBusy || !hasSavableAudio
+  elements.clearButton.disabled = state.isRecording || state.isPlayingBack || isBusy
+  elements.loadAudioButton.disabled = state.isRecording || state.isPlayingBack || isBusy
+  elements.saveButton.disabled = state.isRecording || state.isPlayingBack || isBusy || !hasSavableAudio
+  elements.frameSizeSelect.disabled = state.isRecording || state.isPlayingBack || isBusy
+  elements.overlapInput.disabled = state.isRecording || state.isPlayingBack || isBusy
+  elements.upperFrequencySelect.disabled = state.isRecording || state.isPlayingBack || isBusy
 
   if (state.isLoadingFile) {
     elements.micStatus.textContent = '音声ファイルを読み込み中です。'

@@ -1,60 +1,113 @@
-# SpectLab
+# SpectLab v1.0.0
 
-Vite + TypeScript で構築した静的SPAです。デフォルトではログイン不要で `/recording` を直接利用でき、マイク入力を取得してリアルタイムでスペクトログラムを描画します。`VITE_ENABLE_AUTH=true` を設定すると、将来拡張用の Google ログイン画面（`/login`）を再有効化できます。グラフはTime/Frequency軸をヒートマップ本体と同一Canvas上で描画し、横軸は10秒固定です。分析設定として `Frame size (512-8192)`、`Overlap [%] (0-99)`、`Upper [Hz] (5000/10000/20000)` を指定できます（初期値: `4096`, `75%`, `10000`）。`Upper [Hz]` に応じて `AudioContext` のサンプルレートは Nyquist 条件（`sampleRate >= 2 * Upper`）を満たす値を要求します。dB表示はPCM時間波形（-1〜1）からSTFTで振幅を算出し、`20 * log10(LIN / 2e-5)` で変換します。モバイルでは適応品質制御（FPS/DPR/解析頻度の段階調整）で長時間動作の安定化を行います。振幅レンジの初期値は `-20..80 dB` で、`Freq.Min / Freq.Max / Amp.Min / Amp.Max / Time.Min / Time.Max` をグラフ下の入力とダブルスライダで操作できます。停止中は現在の表示範囲の音声を `WAV` としてローカル保存できます。さらに `Load Audio` でローカル音声ファイルを読み込み、Fileモードとして `0..ファイル長` の時間ドメインで表示できます（30分まで・100MBまで）。本アプリは音声データをサーバーへ送信・保存しません。
+Live app: https://spectlab-watlab.com/recording
 
-## 1. Setup
+SpectLab is a Vite + TypeScript static web app for recording microphone audio, rendering a realtime spectrogram, inspecting FFT profiles, and loading local audio files for offline analysis. Audio processing runs entirely in the browser.
+
+The main public route is `/recording`. When the app is opened from `/` or `/login`, it normalizes the URL to `/recording`.
+
+## Development
 
 ```bash
-cp .env.example .env.local
-# デフォルトは VITE_ENABLE_AUTH=false（ログイン不要）
-# 認証を使う場合のみ VITE_ENABLE_AUTH=true + Firebase Web App の値を入力
 npm install
 npm run dev
 ```
 
-## 2. Build
+## Build
 
 ```bash
 npm run build
 npm run preview
 ```
 
-## 3. Firebase Hosting Deploy
+The production build outputs static files to `dist/`.
 
-前提: `firebase login` 済み。
-`VITE_ENABLE_AUTH=true` で認証を使う場合のみ、Firebase プロジェクト作成とGoogleプロバイダ有効化が必要です。
+## Static Deployment
 
-```bash
-firebase use <your_firebase_project_id>
-npm run build
-firebase deploy --only hosting
-```
+- Upload the contents of `dist/` to a static host.
+- Keep the generated `.htaccess` file next to `index.html` when deploying to Apache-based hosting such as Sakura Rental Server.
+- Configure SPA fallback so direct access to `/recording` serves `index.html`.
+- Use HTTPS in production because browser microphone access requires a secure context.
 
-## 4. Manual Test Checklist
+Sakura-specific deployment notes are in [DEPLOY.md](./DEPLOY.md).
 
-### Audio
-- 開始クリック後にマイク許可ダイアログが表示される
-- 許可後にスペクトログラムが連続更新される
-- 停止で更新が止まり、再開できる
-- 権限拒否時にエラーが表示される
-- 録音中は `Frame size` と `Overlap [%]` と `Upper [Hz]` が無効化（グレーアウト）される
-- `Overlap [%]` は Enter で確定し、`0-99` 範囲外や非数値は復帰する
-- dBカラーバーに目盛りが表示され、`Max/Min` のEnter確定で色レンジが更新される
-- 停止中に `表示範囲を保存` で現在の `Time.Min..Time.Max` がWAV保存される
-- 停止時に直近10秒の取得PCMから再解析し、最終表示を補正する
-- `Load Audio` でローカル音声を読み込める（30分超は拒否）
-- `Load Audio` は100MB超のファイルを事前拒否する
-- Fileモードでは `Time.Max` がファイル長になり、表示範囲の再生/保存が有効
-- Fileモード中に `Record` を押すとLiveモード（10秒窓）へ戻る
+## What SpectLab Can Do
 
-### Auth (optional)
-- `VITE_ENABLE_AUTH=false` でログインUIなしで `/recording` が利用できる
-- `VITE_ENABLE_AUTH=true` でGoogleログイン成功後にユーザー表示が切り替わる
-- `VITE_ENABLE_AUTH=true` でリロード後にログイン状態が復元される
-- `VITE_ENABLE_AUTH=true` でログアウトできる
-- `VITE_ENABLE_AUTH=true` でポップアップ不可時にリダイレクトへフォールバックする
+- Capture microphone audio and draw a scrolling spectrogram in realtime.
+- Load local audio files for offline inspection.
+- Play back the currently visible time range.
+- Save the currently visible time range as a WAV file.
+- Adjust visible frequency, amplitude, and time ranges with both numeric inputs and sliders.
+- Inspect a single-frame FFT or an averaged FFT over a selected time range.
 
-### Hosting
-- `firebase deploy --only hosting` が成功する
-- 本番URLでマイクが利用できる（HTTPS）
-- 直接URLアクセスでもSPAが壊れない
+## How to Use SpectLab
+
+### 1. Start Recording
+
+- Open the app over HTTPS.
+- Click `Record`.
+- Allow microphone access when the browser asks for permission.
+- The spectrogram starts updating in realtime.
+- Click `Stop` on the same button to end live capture.
+
+### 2. Main Action Buttons
+
+- `Record` / `Stop`
+  Starts or stops live microphone analysis.
+- `Clear`
+  Removes the current captured or loaded data and resets the view back to the default live range.
+- `Save Audio`
+  Exports the currently visible time range as a local WAV file.
+- `Load Audio`
+  Opens a local audio file and switches the app into File mode.
+- `Play` / `Stop`
+  Plays only the currently visible time range.
+
+### 3. Analysis Settings
+
+- `Frame size`
+  Sets the FFT frame size. Larger values improve frequency resolution but reduce time resolution.
+- `Overlap [%]`
+  Sets how much adjacent analysis windows overlap. Press `Enter` after typing a value.
+- `Upper [Hz]`
+  Sets the analysis ceiling for the spectrogram and FFT display.
+
+These settings are locked while recording, playing back, or loading a file.
+
+### 4. Range Controls
+
+- `Freq.Min` and `Freq.Max`
+  Control the visible frequency range.
+- `Amp.Min` and `Amp.Max`
+  Control the displayed dB color range.
+- `Time.Min` and `Time.Max`
+  Control the visible time window used for playback, saving, and FFT inspection.
+
+You can either type values directly or drag the corresponding sliders. Typed values are applied when you press `Enter`.
+
+### 5. File Mode
+
+- Use `Load Audio` to inspect a local file instead of the live microphone stream.
+- The app accepts common browser-supported audio formats.
+- Files larger than 100 MB are rejected.
+- Files longer than 30 minutes are rejected.
+- In File mode, the time range expands to the loaded file length instead of the default 10-second live window.
+- Press `Record` to leave File mode and return to live capture mode.
+
+### 6. FFT Profile
+
+- The `FFT Profile` panel shows the frequency spectrum for the current spectrogram position or selected range.
+- In single mode, click or drag on the spectrogram to move the FFT cursor.
+- Click `Average FFT` to switch to average mode.
+- In average mode, drag the time selection on the spectrogram to average the FFT over that range.
+- Click the `Average FFT` button again to return to single mode.
+- The FFT plot updates as you move the spectrogram cursor or change the visible range.
+
+### 7. Typical Workflow
+
+- Press `Record` and capture audio.
+- Narrow the visible area with `Time.Min`, `Time.Max`, `Freq.Min`, and `Freq.Max`.
+- Use `Play` to audition the selected range.
+- Use `Save Audio` to export the selected range.
+- Use the `FFT Profile` panel to inspect spectral content at a point or across a short segment.
+- Use `Load Audio` when you want to analyze an existing local recording instead of live input.

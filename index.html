@@ -8,13 +8,11 @@
   </head>
   <body>
     <div id="app" class="app-shell">
-      <section id="login-page" class="login-page panel">
-        <h1 class="login-title">SpectLab</h1>
-        <button id="login-button" class="btn btn-primary login-button" type="button">Googleでログイン</button>
-      </section>
-
-      <section id="app-page" class="app-page" hidden>
-        <h1 class="login-title app-title">SpectLab</h1>
+      <section class="app-page">
+        <h1 class="page-title app-title">
+          <span>SpectLab</span>
+          <span id="app-version" class="app-version" aria-label="application version"></span>
+        </h1>
 
         <section class="panel canvas-panel">
           <div class="y-axis-area">
@@ -205,12 +203,10 @@
         <div class="panel account-dock">
           <div class="account-info">
             <p id="analysis-metrics" class="analysis-metrics">Actual Fs: - Hz | dt: - s | Δf: - Hz</p>
-            <p id="user-name" class="user-name">-</p>
             <p class="privacy-note">
               プライバシー注記: マイク入力および読み込んだ音声はブラウザ内で処理されます。本アプリは音声データをサーバーへ送信・保存しません。音声ファイルは「Save Audio」を実行した場合のみ、お使いの端末にダウンロード保存されます。
             </p>
           </div>
-          <button id="logout-button" class="btn" type="button">ログアウト</button>
         </div>
       </section>
 

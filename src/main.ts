@@ -1,6 +1,12 @@
 import './style.css'
 import { bootstrapApp } from './app/app'
 import { toErrorMessage } from './utils/errors'
+import packageMeta from '../package.json'
+
+const versionElement = document.getElementById('app-version')
+if (versionElement) {
+  versionElement.textContent = `v${packageMeta.version}`
+}
 
 try {
   bootstrapApp()

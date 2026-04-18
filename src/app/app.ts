@@ -2,21 +2,17 @@ import { createAudioEngine, type CaptureChunk } from '../audio/audioEngine'
 import { createAnalysisService, type AnalysisSnapshot } from '../audio/analysisService'
 import { createFileAnalysisService } from '../audio/fileAnalysisService'
 import { createAppStateStore } from './state'
-import { getFirebaseConfig } from '../firebase/config'
-import { createAuthService } from '../firebase/auth'
-import { initFirebase } from '../firebase/init'
 import {
   createRenderer,
   type AxisRenderConfig,
   type CursorOverlayConfig,
   type PlotMetrics,
 } from '../render/canvas'
-import { renderAuthView } from '../ui/authView'
 import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
 import { isMicrophonePermissionError, toErrorMessage } from '../utils/errors'
 import { Circle, createElement as createLucideElement, Download, Eraser, Play, Square, Upload } from 'lucide'
-import type { AppState, AuthStatus, FrameSize, UpperFrequencyHz } from './types'
+import type { AppState, FrameSize, UpperFrequencyHz } from './types'
 
 const SPECTROGRAM_WINDOW_SECONDS = 10
 const TIME_DOMAIN_MIN_SEC = 0
@@ -25,7 +21,6 @@ const FREQUENCY_DOMAIN_MIN_HZ = 0
 const DEFAULT_MAX_FREQUENCY_HZ = 22050
 const FREQUENCY_TICK_COUNT = 6
 const TIME_TICK_COUNT = 6
-const LOGIN_PATH = '/login'
 const RECORDING_PATH = '/recording'
 const FREQUENCY_STEP_HZ = 1
 const MIN_RANGE_GAP_HZ = 1
@@ -108,8 +103,6 @@ const DESKTOP_QUALITY_PROFILE: QualityProfile = {
   maxAnalysisStepsPerFrame: 16,
 }
 
-type AppRoute = 'login' | 'recording'
-type HistoryMode = 'push' | 'replace'
 type DragHandle = 'min' | 'max'
 
 interface FrequencyRange {
@@ -191,21 +184,13 @@ interface FftFrequencyBounds {
   spanHz: number
 }
 
-function routeToPath(route: AppRoute): string {
-  return route === 'recording' ? RECORDING_PATH : LOGIN_PATH
-}
-
-function routeFromPath(pathname: string): AppRoute {
-  return pathname === RECORDING_PATH ? 'recording' : 'login'
-}
-
-function parseEnableAuthFlag(value: string | undefined): boolean {
-  if (typeof value !== 'string') {
-    return false
+function normalizeRecordingRoute(): void {
+  if (window.location.pathname === RECORDING_PATH) {
+    return
   }
 
-  const normalized = value.trim().toLowerCase()
-  return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on'
+  const normalizedUrl = `${RECORDING_PATH}${window.location.search}${window.location.hash}`
+  window.history.replaceState({}, '', normalizedUrl)
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -585,12 +570,9 @@ function buildAudioFilename(now: Date, timeMinSec: number, timeMaxSec: number): 
 }
 
 export function bootstrapApp(): void {
+  normalizeRecordingRoute()
   const elements = getUIElements()
-  const authEnabled = parseEnableAuthFlag(import.meta.env.VITE_ENABLE_AUTH)
   const stateStore = createAppStateStore({
-    authEnabled,
-    authStatus: authEnabled ? 'loading' : 'signed-in',
-    userName: authEnabled ? null : 'Guest',
     analysisSource: 'live',
     isLoadingFile: false,
     loadedAudioName: null,
@@ -620,7 +602,6 @@ export function bootstrapApp(): void {
     throw new Error('Failed to initialize FFT canvas context.')
   }
 
-  let authUnsubscribe: (() => void) | null = null
   let captureChunkUnsubscribe: (() => void) | null = null
   let analysisColumnsUnsubscribe: (() => void) | null = null
   let frameId: number | null = null
@@ -632,7 +613,6 @@ export function bootstrapApp(): void {
     capturedSamples: 0,
   }
   let renderGateAccumulatorSeconds = 0
-  let lastAuthStatus: AuthStatus | null = null
   let freqDragHandle: DragHandle | null = null
   let freqDragPointerId: number | null = null
   let dbDragHandle: DragHandle | null = null
@@ -1316,53 +1296,6 @@ export function bootstrapApp(): void {
     }),
   )
 
-  const updateRouteVisibility = (route: AppRoute): void => {
-    elements.loginPage.hidden = route !== 'login'
-    elements.appPage.hidden = route !== 'recording'
-  }
-
-  const navigateToRoute = (route: AppRoute, mode: HistoryMode): void => {
-    const targetPath = routeToPath(route)
-    if (window.location.pathname !== targetPath) {
-      if (mode === 'push') {
-        window.history.pushState({}, '', targetPath)
-      } else {
-        window.history.replaceState({}, '', targetPath)
-      }
-    }
-    updateRouteVisibility(route)
-  }
-
-  const canAccessApp = (state: AppState): boolean => !state.authEnabled || state.authStatus === 'signed-in'
-  const ensureAppAccess = (state: AppState, errorMessage = '先にGoogleログインしてください。'): boolean => {
-    if (canAccessApp(state)) {
-      return true
-    }
-    stateStore.setState({ errorMessage })
-    return false
-  }
-
-  const syncRouteByState = (state: AppState): void => {
-    if (!state.authEnabled) {
-      navigateToRoute('recording', 'replace')
-      lastAuthStatus = state.authStatus
-      return
-    }
-
-    if (state.authStatus === 'loading') {
-      updateRouteVisibility('login')
-      lastAuthStatus = state.authStatus
-      return
-    }
-
-    const desiredRoute: AppRoute = state.authStatus === 'signed-in' ? 'recording' : 'login'
-    const mode: HistoryMode =
-      state.authStatus === 'signed-in' && lastAuthStatus === 'signed-out' ? 'push' : 'replace'
-
-    navigateToRoute(desiredRoute, mode)
-    lastAuthStatus = state.authStatus
-  }
-
   const getHistoryCapacity = (): number => {
     const directWidth = renderer.getPlotMetrics().plotWidth
     const fallbackWidth = Math.max(1, Math.floor(elements.canvas.clientWidth))
@@ -1828,7 +1761,7 @@ export function bootstrapApp(): void {
   }
 
   const renderDecibelControls = (state: AppState): void => {
-    const isLocked = !canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)
+    const isLocked = state.isLoadingFile || (conservativeMode && state.isRecording)
     elements.dbMinInput.disabled = isLocked
     elements.dbMaxInput.disabled = isLocked
     elements.dbHandleMin.disabled = isLocked
@@ -1862,7 +1795,7 @@ export function bootstrapApp(): void {
   }
 
   const renderFrequencyControls = (state: AppState): void => {
-    const isLocked = !canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)
+    const isLocked = state.isLoadingFile || (conservativeMode && state.isRecording)
     elements.freqMinInput.disabled = isLocked
     elements.freqMaxInput.disabled = isLocked
     elements.freqHandleMin.disabled = isLocked
@@ -1905,8 +1838,7 @@ export function bootstrapApp(): void {
   }
 
   const renderTimeControls = (state: AppState): void => {
-    const lockTimeRange =
-      !canAccessApp(state) || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode
+    const lockTimeRange = state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode
     elements.timeMinInput.disabled = lockTimeRange
     elements.timeMaxInput.disabled = lockTimeRange
     elements.timeHandleMin.disabled = lockTimeRange
@@ -2361,8 +2293,7 @@ export function bootstrapApp(): void {
   }
 
   const renderPlaybackWidget = (state: AppState, hasSavableAudio: boolean): void => {
-    const canTogglePlayback =
-      canAccessApp(state) && !state.isRecording && !state.isSavingAudio && !state.isLoadingFile && hasSavableAudio
+    const canTogglePlayback = !state.isRecording && !state.isSavingAudio && !state.isLoadingFile && hasSavableAudio
     elements.playbackToggleButton.disabled = !canTogglePlayback
     elements.playbackToggleButton.classList.toggle('is-playing', state.isPlayingBack)
     elements.playbackToggleButton.setAttribute('aria-label', state.isPlayingBack ? 'Stop playback' : 'Play visible range')
@@ -2736,9 +2667,6 @@ export function bootstrapApp(): void {
 
   const loadLocalAudioFile = async (file: File): Promise<void> => {
     const currentState = stateStore.getState()
-    if (!ensureAppAccess(currentState)) {
-      return
-    }
     if (currentState.isRecording || currentState.isPlayingBack || currentState.isSavingAudio || currentState.isLoadingFile) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
@@ -2970,42 +2898,13 @@ export function bootstrapApp(): void {
     frameId = requestAnimationFrame(drawFrame)
   }
 
-  const authService = (() => {
-    if (!authEnabled) {
-      return createAuthService(null)
-    }
-
-    const firebaseConfig = getFirebaseConfig()
-    if (!firebaseConfig.config) {
-      stateStore.setState({
-        authStatus: 'signed-out',
-        errorMessage: `Firebase設定が不足しています: ${firebaseConfig.missingKeys.join(', ')}`,
-      })
-      return createAuthService(null)
-    }
-
-    try {
-      const { auth } = initFirebase(firebaseConfig.config)
-      return createAuthService(auth)
-    } catch (error) {
-      stateStore.setState({
-        authStatus: 'signed-out',
-        errorMessage: toErrorMessage(error, 'Firebase初期化に失敗しました。'),
-      })
-      return createAuthService(null)
-    }
-  })()
-
   const render = (state: AppState): void => {
-    syncRouteByState(state)
-    if (!elements.appPage.hidden && renderer.getPlotMetrics().plotWidth <= 1) {
+    if (renderer.getPlotMetrics().plotWidth <= 1) {
       applyQualityProfile(false, false)
     }
 
-    const accessGranted = canAccessApp(state)
     const hasSavableAudio = hasSavableAudioData()
-    renderAuthView(elements, state, state.authEnabled, authService.isEnabled, accessGranted)
-    renderControlsView(elements, state, hasSavableAudio, accessGranted)
+    renderControlsView(elements, state, hasSavableAudio)
     renderPlaybackWidget(state, hasSavableAudio)
     elements.analysisMetrics.textContent = formatAnalysisMetricsText(
       Math.max(1, state.currentSampleRateHz ?? timelineSyncState.sampleRateHz),
@@ -3017,7 +2916,7 @@ export function bootstrapApp(): void {
     renderTimeControls(state)
     renderDecibelTicks(state.decibelMin, state.decibelMax)
     updateAxisConfig(state)
-    elements.fftAverageToggleButton.disabled = !accessGranted
+    elements.fftAverageToggleButton.disabled = false
     elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
 
     const frequencyRangeChanged =
@@ -3055,8 +2954,7 @@ export function bootstrapApp(): void {
     updateCursorOverlay(state)
     renderFftPanel(state)
 
-    const isRecordingRouteVisible = !elements.appPage.hidden
-    if (state.errorMessage && isRecordingRouteVisible) {
+    if (state.errorMessage) {
       const isTopPopupMessage = state.errorMessage === NO_REAL_DATA_RANGE_MESSAGE
       elements.errorMessage.classList.toggle('error-top-popup', isTopPopupMessage)
       elements.errorMessage.hidden = false
@@ -3069,23 +2967,6 @@ export function bootstrapApp(): void {
   }
 
   stateStore.subscribe(render)
-
-  if (authService.isEnabled) {
-    authUnsubscribe = authService.subscribeAuthState((user) => {
-      stateStore.setState({
-        authStatus: user ? 'signed-in' : 'signed-out',
-        userName: user?.displayName ?? user?.email ?? null,
-        isSavingAudio: user ? stateStore.getState().isSavingAudio : false,
-      })
-
-      if (!user) {
-        void (async () => {
-          await stopVisualization()
-          await stopPlayback()
-        })()
-      }
-    })
-  }
 
   elements.frameSizeSelect.addEventListener('change', () => {
     const state = stateStore.getState()
@@ -3202,7 +3083,7 @@ export function bootstrapApp(): void {
 
   const beginFrequencySliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (!canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)) {
+    if (state.isLoadingFile || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -3266,7 +3147,7 @@ export function bootstrapApp(): void {
 
   const beginDecibelSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (!canAccessApp(state) || state.isLoadingFile || (conservativeMode && state.isRecording)) {
+    if (state.isLoadingFile || (conservativeMode && state.isRecording)) {
       return
     }
 
@@ -3330,7 +3211,7 @@ export function bootstrapApp(): void {
 
   const beginTimeSliderDrag = (target: DragHandle, event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (!canAccessApp(state) || state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode) {
+    if (state.isPlayingBack || state.isRecording || state.isLoadingFile || conservativeMode) {
       return
     }
 
@@ -3555,7 +3436,7 @@ export function bootstrapApp(): void {
 
   const beginFftCursorDrag = (event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (!canAccessApp(state) || state.isLoadingFile) {
+    if (state.isLoadingFile) {
       return
     }
     const cursorBounds = getSpectrogramCursorBoundsSec(state)
@@ -3635,7 +3516,7 @@ export function bootstrapApp(): void {
 
   const beginFftPlotCursorDrag = (event: PointerEvent): void => {
     const state = stateStore.getState()
-    if (!canAccessApp(state) || state.isLoadingFile || state.isRecording) {
+    if (state.isLoadingFile || state.isRecording) {
       return
     }
 
@@ -3683,10 +3564,6 @@ export function bootstrapApp(): void {
   }
 
   elements.fftAverageToggleButton.addEventListener('click', () => {
-    const state = stateStore.getState()
-    if (!canAccessApp(state)) {
-      return
-    }
     toggleAverageFftMode(fftCursorState.mode !== 'average')
   })
 
@@ -3717,9 +3594,6 @@ export function bootstrapApp(): void {
 
   elements.loadAudioButton.addEventListener('click', () => {
     const state = stateStore.getState()
-    if (!ensureAppAccess(state)) {
-      return
-    }
     if (state.isRecording || state.isPlayingBack || state.isSavingAudio || state.isLoadingFile) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
@@ -3742,10 +3616,6 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (!ensureAppAccess(state)) {
-      return
-    }
-
     if (state.isRecording) {
       await stopVisualization()
       return
@@ -3837,10 +3707,6 @@ export function bootstrapApp(): void {
   elements.clearButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
     const state = stateStore.getState()
-    if (!ensureAppAccess(state)) {
-      return
-    }
-
     if (state.isSavingAudio || state.isPlayingBack || state.isRecording || state.isLoadingFile) {
       stateStore.setState({ errorMessage: '停止中にClearを実行してください。' })
       return
@@ -3859,10 +3725,6 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (!ensureAppAccess(state)) {
-      return
-    }
-
     if (state.isSavingAudio || state.isLoadingFile) {
       stateStore.setState({ errorMessage: '保存処理中です。完了後に再生できます。' })
       return
@@ -3886,10 +3748,6 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (!ensureAppAccess(state)) {
-      return
-    }
-
     if (state.isRecording || state.isPlayingBack || state.isLoadingFile) {
       stateStore.setState({ errorMessage: '停止後に表示範囲を保存できます。' })
       return
@@ -3909,57 +3767,11 @@ export function bootstrapApp(): void {
     }
   })
 
-  elements.loginButton.addEventListener('click', async () => {
-    stateStore.setState({ errorMessage: null })
-
-    if (!stateStore.getState().authEnabled) {
-      return
-    }
-
-    if (!authService.isEnabled) {
-      stateStore.setState({ errorMessage: 'Firebase認証が未設定です。' })
-      return
-    }
-
-    try {
-      await authService.signInWithGoogle()
-    } catch (error) {
-      stateStore.setState({
-        errorMessage: toErrorMessage(error, 'Googleログインに失敗しました。'),
-      })
-    }
-  })
-
-  elements.logoutButton.addEventListener('click', async () => {
-    stateStore.setState({ errorMessage: null })
-
-    if (!stateStore.getState().authEnabled) {
-      return
-    }
-
-    try {
-      await stopVisualization()
-      await stopPlayback()
-      await authService.signOut()
-    } catch (error) {
-      stateStore.setState({
-        errorMessage: toErrorMessage(error, 'ログアウトに失敗しました。'),
-      })
-    }
-  })
-
   window.addEventListener('popstate', () => {
-    const state = stateStore.getState()
-    const desiredRoute: AppRoute = canAccessApp(state) ? 'recording' : 'login'
-    if (routeFromPath(window.location.pathname) !== desiredRoute) {
-      navigateToRoute(desiredRoute, 'replace')
-    }
+    normalizeRecordingRoute()
   })
 
   window.addEventListener('beforeunload', () => {
-    if (authUnsubscribe) {
-      authUnsubscribe()
-    }
     if (analysisColumnsUnsubscribe) {
       analysisColumnsUnsubscribe()
       analysisColumnsUnsubscribe = null
