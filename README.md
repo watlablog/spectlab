@@ -1,4 +1,4 @@
-# SpectLab v1.0.0
+# SpectLab
 
 Live app: https://spectlab-watlab.com/recording
 

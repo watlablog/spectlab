@@ -60,13 +60,19 @@ body {
   padding-bottom: 0;
 }
 
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .app-title {
   margin: 0;
-  text-align: center;
   display: inline-flex;
-  justify-content: center;
   align-items: baseline;
   gap: 0.45rem;
+  min-width: 0;
 }
 
 .app-version {
@@ -75,6 +81,57 @@ body {
   letter-spacing: 0.08em;
   color: var(--text-muted);
   opacity: 0.9;
+}
+
+.support-links {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 38px;
+  margin-left: auto;
+  padding: 0 0.5rem 0 0.85rem;
+  border: 1px solid rgba(141, 189, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(8, 24, 42, 0.58);
+  color: var(--text-muted);
+  box-shadow: 0 10px 28px rgba(0, 6, 18, 0.18);
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.support-links a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  color: #f3f6ff;
+  font-size: 0.76rem;
+  text-decoration: none;
+  transition: color 140ms ease, background-color 140ms ease, transform 140ms ease;
+}
+
+.support-links a:hover {
+  color: #d9e9ff;
+  background: rgba(72, 181, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.support-links a:focus-visible {
+  outline: 2px solid rgba(92, 151, 255, 0.7);
+  outline-offset: 3px;
+}
+
+.support-icon {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 auto;
+  fill: currentColor;
 }
 
 .control-panel {
@@ -764,6 +821,16 @@ body {
     padding-top: 0.8rem;
   }
 
+  .app-header {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.55rem;
+  }
+
+  .support-links {
+    margin-left: 0;
+  }
+
   .control-panel {
     flex-direction: column;
     align-items: flex-start;
@@ -832,5 +899,26 @@ body {
   .error-top-popup {
     width: 94vw;
     padding: 0.62rem 0.75rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .app-header {
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  .support-links {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    gap: 0.45rem;
+    padding: 0.36rem 0.5rem 0.36rem 0.7rem;
+    white-space: normal;
+  }
+
+  .support-message,
+  .support-links a span {
+    min-width: 0;
   }
 }

@@ -1,4 +1,3 @@
-import './style.css'
 import { bootstrapApp } from './app/app'
 import { toErrorMessage } from './utils/errors'
 import packageMeta from '../package.json'
