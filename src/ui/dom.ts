@@ -29,6 +29,8 @@ export interface UIElements {
   freqHandleMax: HTMLButtonElement
   dbSlider: HTMLDivElement
   dbSliderSelection: HTMLDivElement
+  dbColorbar: HTMLButtonElement
+  colormapPopover: HTMLDivElement
   dbHandleMin: HTMLButtonElement
   dbHandleMax: HTMLButtonElement
   dbMaxInput: HTMLInputElement
@@ -123,6 +125,8 @@ export function getUIElements(): UIElements {
     freqHandleMax: getRequiredElement<HTMLButtonElement>('freq-handle-max', 'button'),
     dbSlider: getRequiredElement<HTMLDivElement>('db-slider', 'div'),
     dbSliderSelection: getRequiredElement<HTMLDivElement>('db-slider-selection', 'div'),
+    dbColorbar: getRequiredElement<HTMLButtonElement>('db-colorbar', 'button'),
+    colormapPopover: getRequiredElement<HTMLDivElement>('colormap-popover', 'div'),
     dbHandleMin: getRequiredElement<HTMLButtonElement>('db-handle-min', 'button'),
     dbHandleMax: getRequiredElement<HTMLButtonElement>('db-handle-max', 'button'),
     dbMaxInput: getRequiredElement<HTMLInputElement>('db-max-input', 'input'),

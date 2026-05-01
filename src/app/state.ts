@@ -1,3 +1,4 @@
+import { DEFAULT_COLORMAP_ID } from '../render/colorMap'
 import type { AppState, StateSubscriber } from './types'
 
 const DEFAULT_STATE: AppState = {
@@ -14,6 +15,7 @@ const DEFAULT_STATE: AppState = {
   analysisFrameSize: 4096,
   analysisOverlapPercent: 75,
   analysisUpperFrequencyHz: 10000,
+  colormapId: DEFAULT_COLORMAP_ID,
   decibelMin: -20,
   decibelMax: 80,
   frequencyDomainMinHz: 0,

@@ -8,6 +8,14 @@ import {
   type CursorOverlayConfig,
   type PlotMetrics,
 } from '../render/canvas'
+import {
+  buildColormapGradient,
+  COLORMAP_PRESETS,
+  DEFAULT_COLORMAP_ID,
+  getColormapLabel,
+  isColormapId,
+  type ColormapId,
+} from '../render/colorMap'
 import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
 import { isMicrophonePermissionError, toErrorMessage } from '../utils/errors'
@@ -581,6 +589,7 @@ export function bootstrapApp(): void {
     analysisFrameSize: DEFAULT_ANALYSIS_FRAME_SIZE,
     analysisOverlapPercent: DEFAULT_ANALYSIS_OVERLAP_PERCENT,
     analysisUpperFrequencyHz: DEFAULT_ANALYSIS_UPPER_FREQUENCY_HZ,
+    colormapId: DEFAULT_COLORMAP_ID,
     decibelMin: DEFAULT_DECIBEL_MIN,
     decibelMax: DEFAULT_DECIBEL_MAX,
     frequencyDomainMinHz: FREQUENCY_DOMAIN_MIN_HZ,
@@ -632,6 +641,7 @@ export function bootstrapApp(): void {
   let lastRenderedRangeMaxHz: number | null = null
   let lastRenderedDecibelMin: number | null = null
   let lastRenderedDecibelMax: number | null = null
+  let lastRenderedColormapId: ColormapId | null = null
   let lastRenderedTimeMinSec: number | null = null
   let lastRenderedTimeMaxSec: number | null = null
   let lastRenderedFrameSize: FrameSize | null = null
@@ -665,6 +675,8 @@ export function bootstrapApp(): void {
   let fftProfileAccumulator = new Float32Array(0)
   let fftPlotCursorHz: number | null = null
   let fftPlotCursorPointerId: number | null = null
+  let isColormapPopoverOpen = false
+  const colormapOptionButtons = new Map<ColormapId, HTMLButtonElement>()
   const fftCursorState: FftCursorState = {
     mode: 'single',
     singleSec: FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC,
@@ -684,6 +696,80 @@ export function bootstrapApp(): void {
   }
   const fftNumberFormatter = new Intl.NumberFormat('en-US')
   let fftPendingAllowFallbackNotice = false
+
+  const setColormapPopoverOpen = (open: boolean, focusActiveOption = false): void => {
+    isColormapPopoverOpen = open
+    elements.colormapPopover.hidden = !open
+    elements.dbColorbar.setAttribute('aria-expanded', String(open))
+
+    if (open && focusActiveOption) {
+      window.requestAnimationFrame(() => {
+        colormapOptionButtons.get(stateStore.getState().colormapId)?.focus()
+      })
+    }
+  }
+
+  const buildColormapPopover = (): void => {
+    elements.colormapPopover.replaceChildren()
+    colormapOptionButtons.clear()
+
+    let activeCategory: string | null = null
+    for (const preset of COLORMAP_PRESETS) {
+      if (preset.category !== activeCategory) {
+        activeCategory = preset.category
+        const title = document.createElement('p')
+        title.className = 'colormap-group-title'
+        title.textContent = preset.category
+        elements.colormapPopover.append(title)
+      }
+
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'colormap-option'
+      button.dataset.colormapId = preset.id
+      button.setAttribute('role', 'option')
+      button.setAttribute('aria-selected', 'false')
+
+      const swatch = document.createElement('span')
+      swatch.className = 'colormap-swatch'
+      swatch.style.background = buildColormapGradient(preset.id, 'to right')
+      swatch.setAttribute('aria-hidden', 'true')
+
+      const label = document.createElement('span')
+      label.className = 'colormap-label'
+      label.textContent = preset.label
+
+      button.append(swatch, label)
+      button.addEventListener('click', () => {
+        const nextColormapId = button.dataset.colormapId ?? ''
+        if (!isColormapId(nextColormapId)) {
+          return
+        }
+
+        stateStore.setState({ colormapId: nextColormapId })
+        setColormapPopoverOpen(false)
+        elements.dbColorbar.focus()
+      })
+
+      colormapOptionButtons.set(preset.id, button)
+      elements.colormapPopover.append(button)
+    }
+  }
+
+  const renderColormapControl = (state: AppState): void => {
+    elements.dbColorbar.style.background = buildColormapGradient(state.colormapId, 'to bottom')
+    elements.dbColorbar.setAttribute(
+      'aria-label',
+      `Colormap: ${getColormapLabel(state.colormapId)}. Open colormap selector`,
+    )
+    elements.dbColorbar.setAttribute('aria-expanded', String(isColormapPopoverOpen))
+
+    for (const [colormapId, button] of colormapOptionButtons) {
+      const active = colormapId === state.colormapId
+      button.classList.toggle('is-active', active)
+      button.setAttribute('aria-selected', String(active))
+    }
+  }
 
   const getMinimumCursorRangeSec = (state: AppState): number => {
     const sampleRateHz = Math.max(1, timelineSyncState.sampleRateHz)
@@ -2250,6 +2336,7 @@ export function bootstrapApp(): void {
       projectedHistory.bins,
       state.decibelMin,
       state.decibelMax,
+      state.colormapId,
     )
   }
 
@@ -2852,7 +2939,7 @@ export function bootstrapApp(): void {
       state.frequencyMaxHz,
       nyquistHz,
     )
-    renderer.drawColumn(projectedFrequencyData, state.decibelMin, state.decibelMax)
+    renderer.drawColumn(projectedFrequencyData, state.decibelMin, state.decibelMax, state.colormapId)
     scheduleFftProfileRefresh(false, false)
   }
 
@@ -2915,6 +3002,7 @@ export function bootstrapApp(): void {
     renderDecibelControls(state)
     renderTimeControls(state)
     renderDecibelTicks(state.decibelMin, state.decibelMax)
+    renderColormapControl(state)
     updateAxisConfig(state)
     elements.fftAverageToggleButton.disabled = false
     elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
@@ -2923,13 +3011,15 @@ export function bootstrapApp(): void {
       lastRenderedRangeMinHz !== state.frequencyMinHz || lastRenderedRangeMaxHz !== state.frequencyMaxHz
     const decibelRangeChanged =
       lastRenderedDecibelMin !== state.decibelMin || lastRenderedDecibelMax !== state.decibelMax
+    const colormapChanged = lastRenderedColormapId !== state.colormapId
     const timeRangeChanged = lastRenderedTimeMinSec !== state.timeMinSec || lastRenderedTimeMaxSec !== state.timeMaxSec
     const analysisConfigChanged =
       lastRenderedFrameSize !== state.analysisFrameSize ||
       lastRenderedOverlapPercent !== state.analysisOverlapPercent ||
       lastRenderedUpperFrequencyHz !== state.analysisUpperFrequencyHz
-    if (frequencyRangeChanged || decibelRangeChanged || timeRangeChanged) {
-      if (state.analysisSource === 'file') {
+    if (frequencyRangeChanged || decibelRangeChanged || colormapChanged || timeRangeChanged) {
+      const needsFileWindowRender = state.analysisSource === 'file' && (frequencyRangeChanged || timeRangeChanged)
+      if (needsFileWindowRender) {
         requestFileWindowRender(false)
       } else {
         requestHistoryRender()
@@ -2938,6 +3028,7 @@ export function bootstrapApp(): void {
       lastRenderedRangeMaxHz = state.frequencyMaxHz
       lastRenderedDecibelMin = state.decibelMin
       lastRenderedDecibelMax = state.decibelMax
+      lastRenderedColormapId = state.colormapId
       lastRenderedTimeMinSec = state.timeMinSec
       lastRenderedTimeMaxSec = state.timeMaxSec
     }
@@ -2966,7 +3057,35 @@ export function bootstrapApp(): void {
     }
   }
 
+  buildColormapPopover()
   stateStore.subscribe(render)
+
+  elements.dbColorbar.addEventListener('click', () => {
+    const nextOpen = !isColormapPopoverOpen
+    setColormapPopoverOpen(nextOpen, nextOpen)
+  })
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!isColormapPopoverOpen || !(event.target instanceof Node)) {
+      return
+    }
+
+    if (elements.dbColorbar.contains(event.target) || elements.colormapPopover.contains(event.target)) {
+      return
+    }
+
+    setColormapPopoverOpen(false)
+  })
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || !isColormapPopoverOpen) {
+      return
+    }
+
+    event.preventDefault()
+    setColormapPopoverOpen(false)
+    elements.dbColorbar.focus()
+  })
 
   elements.frameSizeSelect.addEventListener('change', () => {
     const state = stateStore.getState()

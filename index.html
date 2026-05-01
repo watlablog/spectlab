@@ -122,12 +122,27 @@
                         aria-label="振幅下限ハンドル"
                       ></button>
                     </div>
-                    <div id="db-colorbar" class="db-colorbar" aria-hidden="true"></div>
+                    <button
+                      id="db-colorbar"
+                      class="db-colorbar"
+                      type="button"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-controls="colormap-popover"
+                      aria-label="Open colormap selector"
+                    ></button>
                     <div class="db-legend">
                       <p class="axis-caption axis-caption-db">Level [dB]</p>
                       <div id="db-ticks" class="db-ticks"></div>
                     </div>
                   </div>
+                  <div
+                    id="colormap-popover"
+                    class="colormap-popover"
+                    role="listbox"
+                    aria-label="Colormap selector"
+                    hidden
+                  ></div>
                 </div>
               </div>
             </div>

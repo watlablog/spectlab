@@ -1,4 +1,4 @@
-import { amplitudeToRgb } from './colorMap'
+import { amplitudeToRgb, type ColormapId } from './colorMap'
 
 const MOBILE_BREAKPOINT_PX = 760
 const DESKTOP_DPR_CAP = 2.0
@@ -65,10 +65,17 @@ export interface CursorOverlayConfig {
 export interface Renderer {
   init(canvas: HTMLCanvasElement): void
   resizeForContainer(): PlotMetrics
-  drawColumn(freq: Float32Array, minDecibels: number, maxDecibels: number): void
+  drawColumn(freq: Float32Array, minDecibels: number, maxDecibels: number, colormapId: ColormapId): void
   composeAxes(config: AxisRenderConfig): void
   setCursorOverlay(config: CursorOverlayConfig | null): void
-  redrawHistory(history: Float32Array, count: number, bins: number, minDecibels: number, maxDecibels: number): void
+  redrawHistory(
+    history: Float32Array,
+    count: number,
+    bins: number,
+    minDecibels: number,
+    maxDecibels: number,
+    colormapId: ColormapId,
+  ): void
   getPlotMetrics(): PlotMetrics
   clear(): void
 }
@@ -219,7 +226,7 @@ class SpectrogramRenderer implements Renderer {
     return this.metrics
   }
 
-  drawColumn(freq: Float32Array, minDecibels: number, maxDecibels: number): void {
+  drawColumn(freq: Float32Array, minDecibels: number, maxDecibels: number, colormapId: ColormapId): void {
     if (!this.ctx || !this.spectrogramCtx || freq.length === 0) {
       return
     }
@@ -250,7 +257,7 @@ class SpectrogramRenderer implements Renderer {
       const binPosition = ((plotHeight - 1 - y) / Math.max(plotHeight - 1, 1)) * (freq.length - 1)
       const sample = sampleInterpolatedValue(freq, binPosition, minDecibels)
       smoothedSample += (sample - smoothedSample) * SPECTROGRAM_VERTICAL_SMOOTH_ALPHA
-      const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels)
+      const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels, colormapId)
       const offset = y * 4
       pixels[offset] = red
       pixels[offset + 1] = green
@@ -281,7 +288,14 @@ class SpectrogramRenderer implements Renderer {
     this.renderComposite()
   }
 
-  redrawHistory(history: Float32Array, count: number, bins: number, minDecibels: number, maxDecibels: number): void {
+  redrawHistory(
+    history: Float32Array,
+    count: number,
+    bins: number,
+    minDecibels: number,
+    maxDecibels: number,
+    colormapId: ColormapId,
+  ): void {
     if (!this.spectrogramCtx) {
       return
     }
@@ -315,7 +329,7 @@ class SpectrogramRenderer implements Renderer {
         const highSample = sampleInterpolatedOffsetValue(history, historyOffsetHigh, bins, binPosition, minDecibels)
         const sample = lowSample + (highSample - lowSample) * sourceBlend
         smoothedSample += (sample - smoothedSample) * SPECTROGRAM_VERTICAL_SMOOTH_ALPHA
-        const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels)
+        const [red, green, blue] = amplitudeToRgb(smoothedSample, minDecibels, maxDecibels, colormapId)
         const pixelOffset = y * 4
         pixels[pixelOffset] = red
         pixels[pixelOffset + 1] = green

@@ -1,3 +1,5 @@
+import type { ColormapId } from '../render/colorMap'
+
 export type FrameSize = 512 | 1024 | 2048 | 4096 | 8192
 export type UpperFrequencyHz = 5000 | 10000 | 20000
 
@@ -15,6 +17,7 @@ export interface AppState {
   analysisFrameSize: FrameSize
   analysisOverlapPercent: number
   analysisUpperFrequencyHz: UpperFrequencyHz
+  colormapId: ColormapId
   decibelMin: number
   decibelMax: number
   frequencyDomainMinHz: number

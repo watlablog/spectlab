@@ -38,6 +38,7 @@ Sakura-specific deployment notes are in [DEPLOY.md](./DEPLOY.md).
 - Play back the currently visible time range.
 - Save the currently visible time range as a WAV file.
 - Adjust visible frequency, amplitude, and time ranges with both numeric inputs and sliders.
+- Switch the spectrogram colormap from the dB color bar.
 - Inspect a single-frame FFT or an averaged FFT over a selected time range.
 
 ## How to Use SpectLab
