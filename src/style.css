@@ -58,6 +58,11 @@ body {
   flex-direction: column;
   gap: 1rem;
   padding-bottom: 0;
+  min-width: 0;
+}
+
+.app-page > * {
+  min-width: 0;
 }
 
 .app-header {
@@ -265,18 +270,24 @@ body {
   grid-template-rows: auto auto auto auto;
   align-items: start;
   gap: 0.7rem;
+  min-width: 0;
 }
 
 .graph-action-widget {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem;
+  min-width: 0;
 }
 
 .graph-action-group {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.55rem;
+}
+
+.graph-action-group-primary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .graph-action-button {
@@ -354,7 +365,7 @@ body {
 
 .chart-layout {
   display: grid;
-  grid-template-columns: var(--freq-slider-width) 1fr;
+  grid-template-columns: var(--freq-slider-width) minmax(0, 1fr);
   align-items: start;
   gap: 0.8rem;
 }
@@ -421,13 +432,15 @@ body {
 
 .plot-area {
   display: grid;
-  grid-template-columns: 1fr 122px;
+  grid-template-columns: minmax(0, 1fr) 122px;
   align-items: start;
   column-gap: 0.75rem;
+  min-width: 0;
 }
 
 .plot-main {
   display: block;
+  min-width: 0;
 }
 
 #spectrogram-canvas {
@@ -784,13 +797,42 @@ body {
   gap: 0.5rem;
 }
 
-.fft-profile-panel {
+.fft-profile-panel,
+.time-waveform-panel {
   border: 1px solid rgba(141, 189, 255, 0.2);
   border-radius: 12px;
   background: rgba(7, 22, 40, 0.55);
   padding: 0.55rem 0.6rem 0.65rem;
   display: grid;
   gap: 0.45rem;
+}
+
+.time-waveform-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  min-height: 34px;
+}
+
+.waveform-normalization-status {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.waveform-normalization-status.is-warning {
+  color: #ffca82;
+}
+
+#normalize-amplitude-button.is-applied {
+  background: #2a6cf8;
+}
+
+#normalize-amplitude-button.is-applied:hover:enabled {
+  background: #3a79ff;
 }
 
 .fft-profile-header {
@@ -800,7 +842,8 @@ body {
   gap: 0.7rem;
 }
 
-.fft-profile-title {
+.fft-profile-title,
+.time-waveform-title {
   margin: 0;
   font-size: 0.82rem;
   color: var(--text-muted);
@@ -829,6 +872,15 @@ body {
 }
 
 #fft-canvas {
+  width: 100%;
+  height: min(24vh, 190px);
+  border-radius: 10px;
+  border: 1px solid rgba(141, 189, 255, 0.2);
+  background: rgba(2, 10, 20, 0.95);
+  display: block;
+}
+
+#waveform-canvas {
   width: 100%;
   height: min(24vh, 190px);
   border-radius: 10px;
@@ -948,7 +1000,7 @@ body {
   }
 
   .plot-area {
-    grid-template-columns: 1fr 112px;
+    grid-template-columns: minmax(0, 1fr) 112px;
   }
 
   .playback-widget {
@@ -967,6 +1019,10 @@ body {
 
   #fft-canvas {
     height: min(22vh, 160px);
+  }
+
+  #waveform-canvas {
+    height: min(19vh, 140px);
   }
 
   .range-field span {

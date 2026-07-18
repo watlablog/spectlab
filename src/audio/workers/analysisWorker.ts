@@ -1,5 +1,6 @@
 import { createStftTransformer, type StftTransformer } from '../stft'
 import type { FrameSize } from '../../app/types'
+import { buildWaveformEnvelope, type WaveformEnvelopeRequest } from '../waveform'
 
 const ANALYSIS_SAMPLE_RATE_HZ = 48_000
 const WINDOW_SECONDS = 10
@@ -44,6 +45,11 @@ interface SnapshotMessage {
   requestId: number
 }
 
+interface WaveformEnvelopeMessage extends WaveformEnvelopeRequest {
+  type: 'waveform-envelope'
+  requestId: number
+}
+
 interface ClearMessage {
   type: 'clear'
 }
@@ -54,6 +60,7 @@ type WorkerRequestMessage =
   | SetPlotWidthMessage
   | FinalizeMessage
   | SnapshotMessage
+  | WaveformEnvelopeMessage
   | ClearMessage
 
 interface ColumnMessage {
@@ -78,7 +85,14 @@ interface ErrorMessage {
   message: string
 }
 
-type WorkerResponseMessage = ColumnMessage | SnapshotResponseMessage | ErrorMessage
+interface WaveformEnvelopeResponseMessage {
+  type: 'waveform-envelope-response'
+  requestId: number
+  minValues: Float32Array<ArrayBufferLike>
+  maxValues: Float32Array<ArrayBufferLike>
+}
+
+type WorkerResponseMessage = ColumnMessage | SnapshotResponseMessage | WaveformEnvelopeResponseMessage | ErrorMessage
 
 const scope = self as unknown as Worker
 
@@ -258,6 +272,53 @@ function getPcmWindowChronological(): Float32Array {
     ordered.set(pcmRing.subarray(0, pcmHead), firstChunkLength)
   }
   return ordered
+}
+
+function readPcmWindowRange(startSample: number, endSample: number): readonly [number, number] | null {
+  const start = clamp(Math.floor(startSample), 0, WINDOW_SAMPLES)
+  const end = clamp(Math.ceil(endSample), start, WINDOW_SAMPLES)
+  if (end <= start) {
+    return null
+  }
+
+  let minValue = Number.POSITIVE_INFINITY
+  let maxValue = Number.NEGATIVE_INFINITY
+  for (let index = start; index < end; index += 1) {
+    const sample = pcmRing[(pcmHead + index) % WINDOW_SAMPLES] ?? 0
+    if (!Number.isFinite(sample)) {
+      continue
+    }
+    minValue = Math.min(minValue, sample)
+    maxValue = Math.max(maxValue, sample)
+  }
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    return null
+  }
+  return [minValue, maxValue]
+}
+
+function postWaveformEnvelope(message: WaveformEnvelopeMessage): void {
+  const timeMinSec = clamp(message.timeMinSec, 0, WINDOW_SECONDS)
+  const timeMaxSec = clamp(message.timeMaxSec, timeMinSec + 1 / ANALYSIS_SAMPLE_RATE_HZ, WINDOW_SECONDS)
+  const startSample = Math.floor(timeMinSec * ANALYSIS_SAMPLE_RATE_HZ)
+  const endSample = Math.ceil(timeMaxSec * ANALYSIS_SAMPLE_RATE_HZ)
+  const validEndSample = WINDOW_SAMPLES
+  const validStartSample = WINDOW_SAMPLES - Math.min(WINDOW_SAMPLES, Math.max(0, capturedSamples48k))
+  const envelope = buildWaveformEnvelope(
+    startSample,
+    endSample,
+    validStartSample,
+    validEndSample,
+    message.columnCount,
+    readPcmWindowRange,
+  )
+  const response: WaveformEnvelopeResponseMessage = {
+    type: 'waveform-envelope-response',
+    requestId: message.requestId,
+    minValues: envelope.minValues,
+    maxValues: envelope.maxValues,
+  }
+  scope.postMessage(response, [envelope.minValues.buffer, envelope.maxValues.buffer])
 }
 
 function emitColumn(column: Float32Array): void {
@@ -525,6 +586,10 @@ scope.onmessage = (event: MessageEvent<WorkerRequestMessage>) => {
       }
       case 'snapshot': {
         postSnapshotResponse(data.requestId)
+        break
+      }
+      case 'waveform-envelope': {
+        postWaveformEnvelope(data)
         break
       }
       case 'finalize': {

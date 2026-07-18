@@ -37,7 +37,7 @@
         <section class="panel canvas-panel">
           <div class="y-axis-area">
             <div class="graph-action-widget">
-              <div class="graph-action-group">
+              <div class="graph-action-group graph-action-group-primary">
                 <button id="start-button" class="btn btn-accent graph-action-button record-toggle-button" type="button" aria-label="Start recording">
                   <span class="record-toggle-icons" aria-hidden="true">
                     <span id="record-action-icon" class="action-icon action-icon-record"></span>
@@ -49,6 +49,10 @@
                 <button id="clear-button" class="btn graph-action-button" type="button">
                   <span id="clear-action-icon" class="action-icon" aria-hidden="true"></span>
                   <span class="action-label">Clear</span>
+                </button>
+                <button id="normalize-amplitude-button" class="btn graph-action-button" type="button" aria-label="Normalize amplitude using visible range">
+                  <span id="normalize-amplitude-action-icon" class="action-icon" aria-hidden="true"></span>
+                  <span class="action-label">Norm.Amp</span>
                 </button>
               </div>
               <div class="graph-action-group">
@@ -203,6 +207,13 @@
               </div>
               <p id="fft-status-label" class="fft-status-label">single @ 10.000 s</p>
               <canvas id="fft-canvas" width="960" height="190" aria-label="FFT profile"></canvas>
+            </section>
+            <section class="time-waveform-panel" aria-label="Time waveform panel">
+              <div class="time-waveform-header">
+                <p class="time-waveform-title">Time waveform</p>
+                <p id="waveform-normalization-status" class="waveform-normalization-status" aria-live="polite" hidden></p>
+              </div>
+              <canvas id="waveform-canvas" width="960" height="190" aria-label="時間波形"></canvas>
             </section>
           </div>
         </section>

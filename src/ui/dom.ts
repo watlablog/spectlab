@@ -6,6 +6,8 @@ export interface UIElements {
   recordStopActionIcon: HTMLSpanElement
   clearButton: HTMLButtonElement
   clearActionIcon: HTMLSpanElement
+  normalizeAmplitudeButton: HTMLButtonElement
+  normalizeAmplitudeActionIcon: HTMLSpanElement
   loadAudioButton: HTMLButtonElement
   loadAudioInput: HTMLInputElement
   loadAudioActionIcon: HTMLSpanElement
@@ -44,6 +46,8 @@ export interface UIElements {
   dbTicks: HTMLDivElement
   canvas: HTMLCanvasElement
   fftCanvas: HTMLCanvasElement
+  waveformCanvas: HTMLCanvasElement
+  waveformNormalizationStatus: HTMLParagraphElement
   fftAverageToggleButton: HTMLButtonElement
   fftStatusLabel: HTMLParagraphElement
 }
@@ -102,6 +106,8 @@ export function getUIElements(): UIElements {
     recordStopActionIcon: getRequiredElement<HTMLSpanElement>('record-stop-action-icon', 'span'),
     clearButton: getRequiredElement<HTMLButtonElement>('clear-button', 'button'),
     clearActionIcon: getRequiredElement<HTMLSpanElement>('clear-action-icon', 'span'),
+    normalizeAmplitudeButton: getRequiredElement<HTMLButtonElement>('normalize-amplitude-button', 'button'),
+    normalizeAmplitudeActionIcon: getRequiredElement<HTMLSpanElement>('normalize-amplitude-action-icon', 'span'),
     loadAudioButton: getRequiredElement<HTMLButtonElement>('load-audio-button', 'button'),
     loadAudioInput: getRequiredElement<HTMLInputElement>('load-audio-input', 'input'),
     loadAudioActionIcon: getRequiredElement<HTMLSpanElement>('load-audio-action-icon', 'span'),
@@ -140,6 +146,8 @@ export function getUIElements(): UIElements {
     dbTicks: getRequiredElement<HTMLDivElement>('db-ticks', 'div'),
     canvas: getRequiredElement<HTMLCanvasElement>('spectrogram-canvas', 'canvas'),
     fftCanvas: getRequiredElement<HTMLCanvasElement>('fft-canvas', 'canvas'),
+    waveformCanvas: getRequiredElement<HTMLCanvasElement>('waveform-canvas', 'canvas'),
+    waveformNormalizationStatus: getRequiredElement<HTMLParagraphElement>('waveform-normalization-status', 'paragraph'),
     fftAverageToggleButton: getRequiredElement<HTMLButtonElement>('fft-average-toggle-button', 'button'),
     fftStatusLabel: getRequiredElement<HTMLParagraphElement>('fft-status-label', 'paragraph'),
   }

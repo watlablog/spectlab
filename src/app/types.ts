@@ -9,6 +9,10 @@ export interface AppState {
   isPlayingBack: boolean
   isSavingAudio: boolean
   isLoadingFile: boolean
+  isNormalizingAmplitude: boolean
+  isAmplitudeNormalizationApplied: boolean
+  amplitudeNormalizationGain: number
+  normalizedGlobalPeakAbs: number | null
   hasMicPermission: boolean
   audioReady: boolean
   loadedAudioName: string | null

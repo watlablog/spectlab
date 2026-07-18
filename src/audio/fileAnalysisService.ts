@@ -1,5 +1,6 @@
 import type { FrameSize } from '../app/types'
 import FileAnalysisWorker from './workers/fileAnalysisWorker?worker'
+import type { WaveformEnvelopeRequest, WaveformEnvelopeResult } from './waveform'
 
 export interface FileLoadResult {
   durationSec: number
@@ -50,11 +51,21 @@ interface SliceAudioMessage {
   timeMaxSec: number
 }
 
+interface WaveformEnvelopeRequestMessage extends WaveformEnvelopeRequest {
+  type: 'waveform-envelope'
+  requestId: number
+}
+
 interface ClearMessage {
   type: 'clear'
 }
 
-type WorkerRequestMessage = LoadFileMessage | RenderWindowMessage | SliceAudioMessage | ClearMessage
+type WorkerRequestMessage =
+  | LoadFileMessage
+  | RenderWindowMessage
+  | SliceAudioMessage
+  | WaveformEnvelopeRequestMessage
+  | ClearMessage
 
 interface LoadFileResponseMessage {
   type: 'load-file-response'
@@ -79,6 +90,11 @@ interface SliceAudioResponseMessage {
   sampleRateHz: number
 }
 
+interface WaveformEnvelopeResponseMessage extends WaveformEnvelopeResult {
+  type: 'waveform-envelope-response'
+  requestId: number
+}
+
 interface ErrorMessage {
   type: 'error'
   requestId?: number
@@ -89,9 +105,10 @@ type WorkerResponseMessage =
   | LoadFileResponseMessage
   | RenderWindowResponseMessage
   | SliceAudioResponseMessage
+  | WaveformEnvelopeResponseMessage
   | ErrorMessage
 
-type PendingRequestKind = 'load' | 'render' | 'slice'
+type PendingRequestKind = 'load' | 'render' | 'slice' | 'waveform'
 
 interface PendingRequest<T> {
   kind: PendingRequestKind
@@ -104,6 +121,7 @@ export interface FileAnalysisService {
   loadFile(samples: Float32Array, sampleRateHz: number): Promise<FileLoadResult>
   renderWindow(params: FileRenderParams): Promise<FileRenderResult>
   sliceAudio(timeMinSec: number, timeMaxSec: number): Promise<FileSliceResult | null>
+  requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult>
   clear(): void
   dispose(): void
 }
@@ -175,6 +193,14 @@ class WorkerFileAnalysisService implements FileAnalysisService {
           samples: data.samples,
           sampleRateHz: data.sampleRateHz,
         } satisfies FileSliceResult)
+        return
+      }
+
+      if (data.type === 'waveform-envelope-response' && pending.kind === 'waveform') {
+        pending.resolve({
+          minValues: data.minValues,
+          maxValues: data.maxValues,
+        } satisfies WaveformEnvelopeResult)
       }
     })
 
@@ -199,7 +225,7 @@ class WorkerFileAnalysisService implements FileAnalysisService {
         sampleRateHz,
       },
       [payload.buffer],
-      15_000,
+      30_000,
     )
   }
 
@@ -228,6 +254,21 @@ class WorkerFileAnalysisService implements FileAnalysisService {
         requestId: this.allocateRequestId(),
         timeMinSec,
         timeMaxSec,
+      },
+      [],
+      10_000,
+    )
+  }
+
+  async requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult> {
+    return this.request<WaveformEnvelopeResult>(
+      'waveform',
+      {
+        type: 'waveform-envelope',
+        requestId: this.allocateRequestId(),
+        timeMinSec: request.timeMinSec,
+        timeMaxSec: request.timeMaxSec,
+        columnCount: Math.max(1, Math.round(request.columnCount)),
       },
       [],
       10_000,

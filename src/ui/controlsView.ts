@@ -6,7 +6,7 @@ export function renderControlsView(
   state: AppState,
   hasSavableAudio: boolean,
 ): void {
-  const isBusy = state.isSavingAudio || state.isLoadingFile
+  const isBusy = state.isSavingAudio || state.isLoadingFile || state.isNormalizingAmplitude
   elements.startButton.disabled = state.isPlayingBack || isBusy
   elements.startButton.classList.toggle('is-recording', state.isRecording)
   elements.startButton.setAttribute('aria-label', state.isRecording ? 'Stop recording' : 'Start recording')
@@ -20,6 +20,11 @@ export function renderControlsView(
 
   if (state.isLoadingFile) {
     elements.micStatus.textContent = '音声ファイルを読み込み中です。'
+    return
+  }
+
+  if (state.isNormalizingAmplitude) {
+    elements.micStatus.textContent = '表示範囲から振幅を正規化しています。'
     return
   }
 

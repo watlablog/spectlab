@@ -8,6 +8,8 @@ import {
   type CursorOverlayConfig,
   type PlotMetrics,
 } from '../render/canvas'
+import { createWaveformRenderer, type WaveformRenderConfig } from '../render/waveform'
+import type { WaveformEnvelopeResult } from '../audio/waveform'
 import {
   buildColormapGradient,
   COLORMAP_PRESETS,
@@ -19,7 +21,7 @@ import {
 import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
 import { isMicrophonePermissionError, toErrorMessage } from '../utils/errors'
-import { Circle, createElement as createLucideElement, Download, Eraser, Play, Square, Upload } from 'lucide'
+import { AudioWaveform, Circle, createElement as createLucideElement, Download, Eraser, Play, Square, Upload } from 'lucide'
 import type { AppState, FrameSize, UpperFrequencyHz } from './types'
 
 const SPECTROGRAM_WINDOW_SECONDS = 10
@@ -49,6 +51,8 @@ const DECIBEL_STEP = 1
 const MIN_DECIBEL_GAP = 1
 const DECIBEL_TICK_COUNT = 6
 const SILENCE_DECIBELS = -160
+const NORMALIZATION_MIN_PEAK = 1e-6
+const NORMALIZATION_OVERFLOW_EPSILON = 1e-6
 const MOBILE_BREAKPOINT_PX = 760
 const MAX_ANALYSIS_BACKLOG_HOPS = 24
 const MAX_COLUMN_BACKLOG_FACTOR = 4
@@ -63,6 +67,7 @@ const FFT_PANEL_DOMAIN_MIN_HZ = 0
 const FFT_PANEL_TICK_COUNT = 6
 const FFT_PANEL_SINGLE_CURSOR_DEFAULT_SEC = 10
 const FFT_PROFILE_REFRESH_INTERVAL_MS = 50
+const WAVEFORM_REFRESH_INTERVAL_MS = 50
 const CURSOR_NEAR_TAP_THRESHOLD_DESKTOP_PX = 20
 const CURSOR_NEAR_TAP_THRESHOLD_MOBILE_PX = 28
 const FFT_CURVE_TENSION = 1
@@ -203,6 +208,71 @@ function normalizeRecordingRoute(): void {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+function getWaveformPeakAbs(envelope: WaveformEnvelopeResult | null): number {
+  if (!envelope) {
+    return 0
+  }
+  const count = Math.min(envelope.minValues.length, envelope.maxValues.length)
+  let peak = 0
+  for (let index = 0; index < count; index += 1) {
+    const minValue = envelope.minValues[index] ?? Number.NaN
+    const maxValue = envelope.maxValues[index] ?? Number.NaN
+    if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+      continue
+    }
+    peak = Math.max(peak, Math.abs(minValue), Math.abs(maxValue))
+  }
+  return peak
+}
+
+function applyGainToWaveformEnvelope(
+  envelope: WaveformEnvelopeResult,
+  gain: number,
+): WaveformEnvelopeResult {
+  const safeGain = Number.isFinite(gain) && gain > 0 ? gain : 1
+  const minValues = new Float32Array(envelope.minValues.length)
+  const maxValues = new Float32Array(envelope.maxValues.length)
+  for (let index = 0; index < envelope.minValues.length; index += 1) {
+    minValues[index] = (envelope.minValues[index] ?? Number.NaN) * safeGain
+  }
+  for (let index = 0; index < envelope.maxValues.length; index += 1) {
+    maxValues[index] = (envelope.maxValues[index] ?? Number.NaN) * safeGain
+  }
+  return { minValues, maxValues }
+}
+
+function applyGainToPcm(
+  samples: Float32Array,
+  gain: number,
+  clipOutput: boolean,
+): Float32Array<ArrayBuffer> {
+  const safeGain = Number.isFinite(gain) && gain > 0 ? gain : 1
+  const output = new Float32Array(samples.length)
+  for (let index = 0; index < samples.length; index += 1) {
+    const scaled = (samples[index] ?? 0) * safeGain
+    output[index] = clipOutput ? clamp(scaled, -1, 1) : scaled
+  }
+  return output
+}
+
+function applyGainToDecibels(decibels: number, gain: number): number {
+  if (!Number.isFinite(decibels) || decibels <= SILENCE_DECIBELS + 1e-6) {
+    return SILENCE_DECIBELS
+  }
+  const safeGain = Number.isFinite(gain) && gain > 0 ? gain : 1
+  return Math.max(SILENCE_DECIBELS, decibels + 20 * Math.log10(safeGain))
+}
+
+function formatNormalizationGain(gain: number): string {
+  if (!Number.isFinite(gain) || gain <= 0) {
+    return '1.00'
+  }
+  if (gain >= 1000 || gain < 0.01) {
+    return gain.toExponential(2)
+  }
+  return gain.toFixed(2)
 }
 
 function traceCatmullRomThroughPoints(
@@ -606,6 +676,8 @@ export function bootstrapApp(): void {
   const fileAnalysisService = createFileAnalysisService()
   const renderer = createRenderer()
   renderer.init(elements.canvas)
+  const waveformRenderer = createWaveformRenderer()
+  waveformRenderer.init(elements.waveformCanvas)
   const fftCanvasCtx = elements.fftCanvas.getContext('2d')
   if (!fftCanvasCtx) {
     throw new Error('Failed to initialize FFT canvas context.')
@@ -647,6 +719,7 @@ export function bootstrapApp(): void {
   let lastRenderedFrameSize: FrameSize | null = null
   let lastRenderedOverlapPercent: number | null = null
   let lastRenderedUpperFrequencyHz: UpperFrequencyHz | null = null
+  let lastRenderedAnalysisSource: AppState['analysisSource'] | null = null
   let activeQualityStageIndex = 0
   let frameTimeEmaMs = 1000 / DESKTOP_QUALITY_PROFILE.renderFps
   let aboveLevel1FrameCount = 0
@@ -696,6 +769,15 @@ export function bootstrapApp(): void {
   }
   const fftNumberFormatter = new Intl.NumberFormat('en-US')
   let fftPendingAllowFallbackNotice = false
+  let waveformEnvelope: WaveformEnvelopeResult | null = null
+  let waveformRefreshTimeoutId: number | null = null
+  let waveformLastRefreshAtMs = 0
+  let waveformRequestInFlight = false
+  let waveformRefreshPending = false
+  let waveformGeneration = 0
+  let waveformRawPeakAbs = 0
+  let waveformCurrentPeakAbs = 0
+  let normalizationRequestSequence = 0
 
   const setColormapPopoverOpen = (open: boolean, focusActiveOption = false): void => {
     isColormapPopoverOpen = open
@@ -1164,7 +1246,7 @@ export function bootstrapApp(): void {
 
     const sampleSpectrumDb = (frequencyHz: number): number => {
       if (spectrum.length <= 1) {
-        return spectrum[0] ?? minDb
+        return applyGainToDecibels(spectrum[0] ?? minDb, state.amplitudeNormalizationGain)
       }
 
       const normalizedBin = clamp((frequencyHz / nyquistHz) * (spectrum.length - 1), 0, spectrum.length - 1)
@@ -1173,7 +1255,10 @@ export function bootstrapApp(): void {
       const blend = normalizedBin - lowerBin
       const lowerDb = spectrum[lowerBin] ?? minDb
       const upperDb = spectrum[upperBin] ?? lowerDb
-      return lowerDb + (upperDb - lowerDb) * blend
+      return applyGainToDecibels(
+        lowerDb + (upperDb - lowerDb) * blend,
+        state.amplitudeNormalizationGain,
+      )
     }
 
     const plotYSeries = new Float32Array(plotWidth)
@@ -1318,6 +1403,273 @@ export function bootstrapApp(): void {
       refreshFftProfile(allowNotice)
     }, waitMs)
   }
+
+  const getWaveformRenderConfig = (state: AppState): WaveformRenderConfig => ({
+    timeMinSec: state.timeMinSec,
+    timeMaxSec: state.timeMaxSec,
+    xTicksSec: buildTimeTicks(state.timeMinSec, state.timeMaxSec),
+    isAmplitudeNormalizationApplied: state.isAmplitudeNormalizationApplied,
+  })
+
+  const updateAmplitudeNormalizationUi = (state: AppState): void => {
+    const hasNormalizableRange = waveformRawPeakAbs > NORMALIZATION_MIN_PEAK
+    elements.normalizeAmplitudeButton.disabled =
+      state.isRecording ||
+      state.isPlayingBack ||
+      state.isSavingAudio ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude ||
+      !hasNormalizableRange
+    elements.normalizeAmplitudeButton.classList.toggle('is-applied', state.isAmplitudeNormalizationApplied)
+    elements.normalizeAmplitudeButton.setAttribute(
+      'aria-label',
+      state.isNormalizingAmplitude
+        ? 'Normalizing amplitude'
+        : state.isAmplitudeNormalizationApplied
+          ? `Recalculate amplitude normalization using visible range. Current gain ${formatNormalizationGain(
+              state.amplitudeNormalizationGain,
+            )}`
+          : 'Normalize amplitude using visible range',
+    )
+
+    if (!state.isAmplitudeNormalizationApplied) {
+      elements.waveformNormalizationStatus.hidden = true
+      elements.waveformNormalizationStatus.textContent = ''
+      elements.waveformNormalizationStatus.title = ''
+      elements.waveformNormalizationStatus.classList.remove('is-warning')
+      return
+    }
+
+    const hasCurrentOverflow = waveformCurrentPeakAbs > 1 + NORMALIZATION_OVERFLOW_EPSILON
+    elements.waveformNormalizationStatus.hidden = false
+    elements.waveformNormalizationStatus.classList.toggle('is-warning', hasCurrentOverflow)
+    elements.waveformNormalizationStatus.title =
+      state.normalizedGlobalPeakAbs !== null
+        ? `Normalized retained-audio peak: ${state.normalizedGlobalPeakAbs.toFixed(3)}`
+        : ''
+    elements.waveformNormalizationStatus.textContent = hasCurrentOverflow
+      ? `Gain ×${formatNormalizationGain(state.amplitudeNormalizationGain)} · Current peak ${waveformCurrentPeakAbs.toFixed(
+          2,
+        )} · Play/Save clips >1`
+      : `Gain ×${formatNormalizationGain(state.amplitudeNormalizationGain)}`
+  }
+
+  const getAmplitudeNormalizationResetPatch = (): Partial<AppState> => {
+    normalizationRequestSequence += 1
+    return {
+      isNormalizingAmplitude: false,
+      isAmplitudeNormalizationApplied: false,
+      amplitudeNormalizationGain: 1,
+      normalizedGlobalPeakAbs: null,
+    }
+  }
+
+  const clearWaveformPanel = (state: AppState = stateStore.getState()): void => {
+    waveformGeneration += 1
+    waveformEnvelope = null
+    waveformRawPeakAbs = 0
+    waveformCurrentPeakAbs = 0
+    waveformRefreshPending = false
+    if (waveformRefreshTimeoutId !== null) {
+      window.clearTimeout(waveformRefreshTimeoutId)
+      waveformRefreshTimeoutId = null
+    }
+    waveformRenderer.clear(getWaveformRenderConfig(state))
+    updateAmplitudeNormalizationUi(state)
+  }
+
+  const runWaveformRefresh = async (): Promise<void> => {
+    if (waveformRequestInFlight) {
+      waveformRefreshPending = true
+      return
+    }
+
+    waveformRequestInFlight = true
+    waveformRefreshPending = false
+    const requestGeneration = waveformGeneration
+    const requestState = stateStore.getState()
+    const metrics = waveformRenderer.resizeForContainer()
+    const columnCount = Math.max(1, metrics.plotWidth)
+    const request = {
+      timeMinSec: requestState.timeMinSec,
+      timeMaxSec: requestState.timeMaxSec,
+      columnCount,
+    }
+
+    try {
+      const result =
+        requestState.analysisSource === 'file'
+          ? await fileAnalysisService.requestWaveformEnvelope(request)
+          : await analysisService.requestWaveformEnvelope(request)
+      const latestState = stateStore.getState()
+      const latestMetrics = waveformRenderer.resizeForContainer()
+      const isCurrent =
+        requestGeneration === waveformGeneration &&
+        latestState.analysisSource === requestState.analysisSource &&
+        latestState.timeMinSec === requestState.timeMinSec &&
+        latestState.timeMaxSec === requestState.timeMaxSec &&
+        latestMetrics.plotWidth === columnCount
+      if (isCurrent) {
+        const normalizedEnvelope = applyGainToWaveformEnvelope(result, latestState.amplitudeNormalizationGain)
+        waveformEnvelope = normalizedEnvelope
+        waveformRawPeakAbs = getWaveformPeakAbs(result)
+        waveformCurrentPeakAbs = getWaveformPeakAbs(normalizedEnvelope)
+        waveformRenderer.render(normalizedEnvelope, getWaveformRenderConfig(latestState))
+        updateAmplitudeNormalizationUi(latestState)
+      }
+    } catch {
+      if (requestGeneration === waveformGeneration) {
+        waveformEnvelope = null
+        waveformRawPeakAbs = 0
+        waveformCurrentPeakAbs = 0
+        waveformRenderer.clear(getWaveformRenderConfig(stateStore.getState()))
+        updateAmplitudeNormalizationUi(stateStore.getState())
+      }
+    } finally {
+      waveformLastRefreshAtMs = performance.now()
+      waveformRequestInFlight = false
+      if (waveformRefreshPending) {
+        scheduleWaveformRefresh(false)
+      }
+    }
+  }
+
+  const scheduleWaveformRefresh = (force: boolean): void => {
+    if (document.hidden && !force) {
+      return
+    }
+    waveformRefreshPending = true
+    if (force && waveformRefreshTimeoutId !== null) {
+      window.clearTimeout(waveformRefreshTimeoutId)
+      waveformRefreshTimeoutId = null
+    }
+    if (waveformRequestInFlight) {
+      return
+    }
+
+    const elapsed = performance.now() - waveformLastRefreshAtMs
+    const waitMs = force ? 0 : Math.max(0, WAVEFORM_REFRESH_INTERVAL_MS - elapsed)
+    if (waitMs <= 0) {
+      void runWaveformRefresh()
+      return
+    }
+    if (waveformRefreshTimeoutId !== null) {
+      return
+    }
+    waveformRefreshTimeoutId = window.setTimeout(() => {
+      waveformRefreshTimeoutId = null
+      void runWaveformRefresh()
+    }, waitMs)
+  }
+
+  const requestWaveformPeak = async (
+    source: AppState['analysisSource'],
+    timeMinSec: number,
+    timeMaxSec: number,
+  ): Promise<number> => {
+    const envelope =
+      source === 'file'
+        ? await fileAnalysisService.requestWaveformEnvelope({
+            timeMinSec,
+            timeMaxSec,
+            columnCount: 1,
+          })
+        : await analysisService.requestWaveformEnvelope({
+            timeMinSec,
+            timeMaxSec,
+            columnCount: 1,
+          })
+    return getWaveformPeakAbs(envelope)
+  }
+
+  const normalizeAmplitudeUsingVisibleRange = async (): Promise<void> => {
+    const requestState = stateStore.getState()
+    if (
+      requestState.isRecording ||
+      requestState.isPlayingBack ||
+      requestState.isSavingAudio ||
+      requestState.isLoadingFile ||
+      requestState.isNormalizingAmplitude ||
+      waveformRawPeakAbs <= NORMALIZATION_MIN_PEAK
+    ) {
+      return
+    }
+
+    normalizationRequestSequence += 1
+    const requestSequence = normalizationRequestSequence
+    const source = requestState.analysisSource
+    const timeMinSec = requestState.timeMinSec
+    const timeMaxSec = requestState.timeMaxSec
+    const domainMinSec = requestState.timeDomainMinSec
+    const domainMaxSec = requestState.timeDomainMaxSec
+    stateStore.setState({
+      isNormalizingAmplitude: true,
+      errorMessage: null,
+    })
+
+    try {
+      const [visiblePeakAbs, globalPeakAbs] = await Promise.all([
+        requestWaveformPeak(source, timeMinSec, timeMaxSec),
+        requestWaveformPeak(source, domainMinSec, domainMaxSec),
+      ])
+      const latestState = stateStore.getState()
+      const isCurrent =
+        requestSequence === normalizationRequestSequence &&
+        latestState.isNormalizingAmplitude &&
+        latestState.analysisSource === source &&
+        latestState.timeMinSec === timeMinSec &&
+        latestState.timeMaxSec === timeMaxSec &&
+        latestState.timeDomainMinSec === domainMinSec &&
+        latestState.timeDomainMaxSec === domainMaxSec
+      if (!isCurrent) {
+        return
+      }
+
+      if (!Number.isFinite(visiblePeakAbs) || visiblePeakAbs <= NORMALIZATION_MIN_PEAK) {
+        stateStore.setState({
+          isNormalizingAmplitude: false,
+          errorMessage: '現在の時間範囲に正規化できる音声データがありません。',
+        })
+        return
+      }
+
+      const nextGain = 1 / visiblePeakAbs
+      const nextGlobalPeakAbs = Number.isFinite(globalPeakAbs) ? globalPeakAbs * nextGain : null
+      const previousGain = latestState.amplitudeNormalizationGain
+      if (waveformEnvelope) {
+        waveformEnvelope = applyGainToWaveformEnvelope(waveformEnvelope, nextGain / previousGain)
+        waveformRenderer.render(waveformEnvelope, {
+          ...getWaveformRenderConfig(latestState),
+          isAmplitudeNormalizationApplied: true,
+        })
+      }
+      waveformCurrentPeakAbs = waveformRawPeakAbs * nextGain
+      stateStore.setState({
+        isNormalizingAmplitude: false,
+        isAmplitudeNormalizationApplied: true,
+        amplitudeNormalizationGain: nextGain,
+        normalizedGlobalPeakAbs: nextGlobalPeakAbs,
+        errorMessage: null,
+      })
+      requestHistoryRender()
+      scheduleFftProfileRefresh(true, false)
+      waveformGeneration += 1
+      scheduleWaveformRefresh(true)
+    } catch (error) {
+      if (requestSequence !== normalizationRequestSequence) {
+        return
+      }
+      stateStore.setState({
+        isNormalizingAmplitude: false,
+        errorMessage: toErrorMessage(error, '振幅の正規化に失敗しました。'),
+      })
+    } finally {
+      const latestState = stateStore.getState()
+      if (requestSequence === normalizationRequestSequence && latestState.isNormalizingAmplitude) {
+        stateStore.setState({ isNormalizingAmplitude: false })
+      }
+    }
+  }
   elements.recordActionIcon.replaceChildren(
     createLucideElement(Circle, {
       width: 16,
@@ -1338,6 +1690,15 @@ export function bootstrapApp(): void {
   )
   elements.clearActionIcon.replaceChildren(
     createLucideElement(Eraser, {
+      width: 16,
+      height: 16,
+      'stroke-width': 2.3,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }),
+  )
+  elements.normalizeAmplitudeActionIcon.replaceChildren(
+    createLucideElement(AudioWaveform, {
       width: 16,
       height: 16,
       'stroke-width': 2.3,
@@ -1539,6 +1900,7 @@ export function bootstrapApp(): void {
     domainSec: number,
     timelineColumns: number,
     nyquistHz: number,
+    amplitudeGain: number,
   ): { history: Float32Array; count: number; bins: number } => {
     const bins = frequencyHistoryRing.bins
 
@@ -1561,7 +1923,13 @@ export function bootstrapApp(): void {
       const ringIndex = (frequencyHistoryRing.head + timelineIndex) % frequencyHistoryRing.capacity
       const sourceOffset = ringIndex * bins
       const rawColumn = frequencyHistoryRing.data.subarray(sourceOffset, sourceOffset + bins)
-      const projectedFrequencyData = projectFrequencyRange(rawColumn, rangeMinHz, rangeMaxHz, nyquistHz)
+      const projectedFrequencyData = projectFrequencyRange(
+        rawColumn,
+        rangeMinHz,
+        rangeMaxHz,
+        nyquistHz,
+        amplitudeGain,
+      )
       historyLinearBuffer.set(projectedFrequencyData, writeOffset)
       writeOffset += bins
     }
@@ -1643,6 +2011,7 @@ export function bootstrapApp(): void {
       clampFftCursorsToActiveDomain()
       requestHistoryRender()
       scheduleFftProfileRefresh(true, false)
+      scheduleWaveformRefresh(true)
     } catch (error) {
       stateStore.setState({
         errorMessage: toErrorMessage(error, '解析履歴の同期に失敗しました。'),
@@ -1797,6 +2166,7 @@ export function bootstrapApp(): void {
 
   const applyRendererLayout = (): void => {
     renderer.resizeForContainer()
+    waveformRenderer.resizeForContainer()
     syncFrequencySliderToPlot()
     ensureHistoryRingMatchesRenderer()
   }
@@ -2287,6 +2657,7 @@ export function bootstrapApp(): void {
     rangeMinHz: number,
     rangeMaxHz: number,
     nyquistHz: number,
+    amplitudeGain: number,
   ): Float32Array => {
     if (rawFrequencyData.length === 0) {
       return rawFrequencyData
@@ -2306,7 +2677,10 @@ export function bootstrapApp(): void {
       // Renderer assumes bin index grows from low->high and maps high bin to top row.
       const selectedHz = rangeMinHz + ratio * spanHz
       const selectedBin = clamp(Math.round((selectedHz / safeNyquistHz) * maxIndex), 0, maxIndex)
-      projectionBuffer[index] = rawFrequencyData[selectedBin] ?? 0
+      projectionBuffer[index] = applyGainToDecibels(
+        rawFrequencyData[selectedBin] ?? SILENCE_DECIBELS,
+        amplitudeGain,
+      )
     }
 
     return projectionBuffer.subarray(0, outputLength)
@@ -2329,6 +2703,7 @@ export function bootstrapApp(): void {
       domainSec,
       frequencyHistoryRing.capacity,
       nyquistHz,
+      state.amplitudeNormalizationGain,
     )
     renderer.redrawHistory(
       projectedHistory.history,
@@ -2410,6 +2785,7 @@ export function bootstrapApp(): void {
     latestCapturedSamples48k = column.capturedSamples48k
     timelineSyncState.capturedSamples = column.capturedSamples48k
     mergeAnalysisFrame(column.spectrum)
+    scheduleWaveformRefresh(false)
     if (stateStore.getState().isRecording && frameId === null) {
       lastAnimationTimestamp = null
       frameId = requestAnimationFrame(drawFrame)
@@ -2424,6 +2800,7 @@ export function bootstrapApp(): void {
   stateStore.setState({ currentSampleRateHz: analysisService.getSampleRateHz() })
   void syncHistoryFromWorker()
   scheduleFftProfileRefresh(true, false)
+  scheduleWaveformRefresh(true)
 
   const resolveDisplayedAudioSlice = async (state: AppState): Promise<DisplayedAudioSlice | null> => {
     if (state.analysisSource === 'file') {
@@ -2433,7 +2810,7 @@ export function bootstrapApp(): void {
       }
 
       return {
-        samples: fileSlice.samples,
+        samples: applyGainToPcm(fileSlice.samples, state.amplitudeNormalizationGain, false),
         sampleRateHz: fileSlice.sampleRateHz,
         startSample: 0,
         endSample: fileSlice.samples.length,
@@ -2475,7 +2852,7 @@ export function bootstrapApp(): void {
     }
 
     return {
-      samples,
+      samples: applyGainToPcm(samples, state.amplitudeNormalizationGain, false),
       sampleRateHz: timelineSyncState.sampleRateHz,
       startSample: selectedRange.start,
       endSample: selectedRange.end,
@@ -2520,13 +2897,29 @@ export function bootstrapApp(): void {
 
   const startPlayback = async (): Promise<void> => {
     const state = stateStore.getState()
-    if (state.isRecording || state.isPlayingBack || state.isSavingAudio || state.isLoadingFile) {
+    if (
+      state.isRecording ||
+      state.isPlayingBack ||
+      state.isSavingAudio ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude
+    ) {
       return
     }
 
-    const displayedSlice = await resolveDisplayedAudioSlice(state)
+    await stopPlayback()
+    stateStore.setState({ isPlayingBack: true, errorMessage: null })
+
+    let displayedSlice: DisplayedAudioSlice | null
+    try {
+      displayedSlice = await resolveDisplayedAudioSlice(state)
+    } catch (error) {
+      stateStore.setState({ isPlayingBack: false })
+      throw error
+    }
     if (!displayedSlice) {
       stateStore.setState({
+        isPlayingBack: false,
         errorMessage:
           state.analysisSource === 'live' && hasSavableAudioData()
             ? NO_REAL_DATA_RANGE_MESSAGE
@@ -2535,14 +2928,12 @@ export function bootstrapApp(): void {
       return
     }
 
-    await stopPlayback()
-
     const context = new AudioContext()
     if (context.state === 'suspended') {
       await context.resume()
     }
 
-    const playbackSamples = new Float32Array(displayedSlice.samples)
+    const playbackSamples = applyGainToPcm(displayedSlice.samples, 1, true)
     const buffer = context.createBuffer(1, playbackSamples.length, displayedSlice.sampleRateHz)
     buffer.copyToChannel(playbackSamples, 0)
 
@@ -2562,24 +2953,34 @@ export function bootstrapApp(): void {
       void stopPlayback()
     }
 
-    stateStore.setState({
-      isPlayingBack: true,
-      errorMessage: null,
-    })
-
     sourceNode.start()
     startPlaybackProgressLoop()
   }
 
   const saveDisplayedAudio = async (): Promise<void> => {
     const state = stateStore.getState()
-    if (state.isRecording || state.isPlayingBack || state.isSavingAudio || state.isLoadingFile) {
+    if (
+      state.isRecording ||
+      state.isPlayingBack ||
+      state.isSavingAudio ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude
+    ) {
       return
     }
 
-    const displayedSlice = await resolveDisplayedAudioSlice(state)
+    stateStore.setState({ isSavingAudio: true, errorMessage: null })
+
+    let displayedSlice: DisplayedAudioSlice | null
+    try {
+      displayedSlice = await resolveDisplayedAudioSlice(state)
+    } catch (error) {
+      stateStore.setState({ isSavingAudio: false })
+      throw error
+    }
     if (!displayedSlice) {
       stateStore.setState({
+        isSavingAudio: false,
         errorMessage:
           state.analysisSource === 'live' && hasSavableAudioData()
             ? NO_REAL_DATA_RANGE_MESSAGE
@@ -2587,8 +2988,6 @@ export function bootstrapApp(): void {
       })
       return
     }
-
-    stateStore.setState({ isSavingAudio: true, errorMessage: null })
 
     let downloadUrl: string | null = null
     let anchor: HTMLAnchorElement | null = null
@@ -2625,6 +3024,7 @@ export function bootstrapApp(): void {
     pendingFileRenderAfterCurrent = false
     fileRenderSequence += 1
     fileAnalysisService.clear()
+    clearWaveformPanel()
 
     const liveSampleRate = analysisService.getSampleRateHz()
     stateStore.setState({
@@ -2637,6 +3037,7 @@ export function bootstrapApp(): void {
       timeDomainMaxSec: TIME_DOMAIN_MAX_SEC,
       timeMinSec: TIME_DOMAIN_MIN_SEC,
       timeMaxSec: TIME_DOMAIN_MAX_SEC,
+      ...getAmplitudeNormalizationResetPatch(),
     })
     syncTimelineState()
   }
@@ -2654,6 +3055,7 @@ export function bootstrapApp(): void {
     setHistoryFromLinear(snapshot.spectrogramHistory, snapshot.count, snapshot.bins)
     clampFftCursorsToActiveDomain()
     scheduleFftProfileRefresh(true, false)
+    scheduleWaveformRefresh(true)
   }
 
   const stopVisualization = async (): Promise<void> => {
@@ -2735,6 +3137,7 @@ export function bootstrapApp(): void {
     resetAnalysisBuffers()
     renderer.clear()
     fftProfileState = null
+    clearWaveformPanel()
     fftCursorState.lastFallbackNoticeKey = null
     stateStore.setState({
       analysisSource: 'live',
@@ -2747,6 +3150,7 @@ export function bootstrapApp(): void {
       timeMinSec: TIME_DOMAIN_MIN_SEC,
       timeMaxSec: TIME_DOMAIN_MAX_SEC,
       errorMessage: null,
+      ...getAmplitudeNormalizationResetPatch(),
     })
     syncTimelineState()
     scheduleFftProfileRefresh(true, false)
@@ -2754,7 +3158,13 @@ export function bootstrapApp(): void {
 
   const loadLocalAudioFile = async (file: File): Promise<void> => {
     const currentState = stateStore.getState()
-    if (currentState.isRecording || currentState.isPlayingBack || currentState.isSavingAudio || currentState.isLoadingFile) {
+    if (
+      currentState.isRecording ||
+      currentState.isPlayingBack ||
+      currentState.isSavingAudio ||
+      currentState.isLoadingFile ||
+      currentState.isNormalizingAmplitude
+    ) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
     }
@@ -2793,6 +3203,7 @@ export function bootstrapApp(): void {
     resetAnalysisBuffers()
     renderer.clear()
     fftProfileState = null
+    clearWaveformPanel()
     fftCursorState.lastFallbackNoticeKey = null
 
     stateStore.setState({
@@ -2801,6 +3212,7 @@ export function bootstrapApp(): void {
       isRecording: false,
       audioReady: false,
       errorMessage: null,
+      ...getAmplitudeNormalizationResetPatch(),
     })
 
     try {
@@ -2852,6 +3264,7 @@ export function bootstrapApp(): void {
       clampFftCursorsToActiveDomain()
       syncTimelineState()
       requestFileWindowRender(true)
+      scheduleWaveformRefresh(true)
     } catch (error) {
       resetToLiveModeState()
       stateStore.setState({
@@ -2868,6 +3281,7 @@ export function bootstrapApp(): void {
     elements.canvas.dataset.dprCap = String(qualityProfile.dprCap)
     applyRendererLayout()
     scheduleFftProfileRefresh(true, false)
+    scheduleWaveformRefresh(true)
 
     if (redrawHistory) {
       if (stateStore.getState().analysisSource === 'file') {
@@ -2938,6 +3352,7 @@ export function bootstrapApp(): void {
       state.frequencyMinHz,
       state.frequencyMaxHz,
       nyquistHz,
+      state.amplitudeNormalizationGain,
     )
     renderer.drawColumn(projectedFrequencyData, state.decibelMin, state.decibelMax, state.colormapId)
     scheduleFftProfileRefresh(false, false)
@@ -2993,6 +3408,7 @@ export function bootstrapApp(): void {
     const hasSavableAudio = hasSavableAudioData()
     renderControlsView(elements, state, hasSavableAudio)
     renderPlaybackWidget(state, hasSavableAudio)
+    updateAmplitudeNormalizationUi(state)
     elements.analysisMetrics.textContent = formatAnalysisMetricsText(
       Math.max(1, state.currentSampleRateHz ?? timelineSyncState.sampleRateHz),
       state.analysisFrameSize,
@@ -3013,6 +3429,7 @@ export function bootstrapApp(): void {
       lastRenderedDecibelMin !== state.decibelMin || lastRenderedDecibelMax !== state.decibelMax
     const colormapChanged = lastRenderedColormapId !== state.colormapId
     const timeRangeChanged = lastRenderedTimeMinSec !== state.timeMinSec || lastRenderedTimeMaxSec !== state.timeMaxSec
+    const analysisSourceChanged = lastRenderedAnalysisSource !== state.analysisSource
     const analysisConfigChanged =
       lastRenderedFrameSize !== state.analysisFrameSize ||
       lastRenderedOverlapPercent !== state.analysisOverlapPercent ||
@@ -3031,6 +3448,14 @@ export function bootstrapApp(): void {
       lastRenderedColormapId = state.colormapId
       lastRenderedTimeMinSec = state.timeMinSec
       lastRenderedTimeMaxSec = state.timeMaxSec
+    }
+    if (analysisSourceChanged || timeRangeChanged) {
+      lastRenderedAnalysisSource = state.analysisSource
+      waveformGeneration += 1
+      waveformRawPeakAbs = 0
+      waveformCurrentPeakAbs = 0
+      updateAmplitudeNormalizationUi(state)
+      scheduleWaveformRefresh(true)
     }
     if (analysisConfigChanged) {
       lastRenderedFrameSize = state.analysisFrameSize
@@ -3713,7 +4138,13 @@ export function bootstrapApp(): void {
 
   elements.loadAudioButton.addEventListener('click', () => {
     const state = stateStore.getState()
-    if (state.isRecording || state.isPlayingBack || state.isSavingAudio || state.isLoadingFile) {
+    if (
+      state.isRecording ||
+      state.isPlayingBack ||
+      state.isSavingAudio ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude
+    ) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
     }
@@ -3753,6 +4184,16 @@ export function bootstrapApp(): void {
       stateStore.setState({ errorMessage: '音声ファイルの読み込み完了後にRecordしてください。' })
       return
     }
+
+    stateStore.setState({
+      ...getAmplitudeNormalizationResetPatch(),
+      errorMessage: null,
+    })
+    requestHistoryRender()
+    scheduleFftProfileRefresh(true, false)
+    waveformGeneration += 1
+    waveformRawPeakAbs = 0
+    waveformCurrentPeakAbs = 0
 
     try {
       await stopPlayback()
@@ -3801,6 +4242,7 @@ export function bootstrapApp(): void {
         currentSampleRateHz: analysisService.getSampleRateHz(),
       })
       scheduleFftProfileRefresh(true, false)
+      scheduleWaveformRefresh(true)
 
       frameId = requestAnimationFrame(drawFrame)
       void syncHistoryFromWorker()
@@ -3820,13 +4262,20 @@ export function bootstrapApp(): void {
       }
       await audioEngine.stop().catch(() => undefined)
       scheduleFftProfileRefresh(true, false)
+      scheduleWaveformRefresh(true)
     }
   })
 
   elements.clearButton.addEventListener('click', async () => {
     stateStore.setState({ errorMessage: null })
     const state = stateStore.getState()
-    if (state.isSavingAudio || state.isPlayingBack || state.isRecording || state.isLoadingFile) {
+    if (
+      state.isSavingAudio ||
+      state.isPlayingBack ||
+      state.isRecording ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude
+    ) {
       stateStore.setState({ errorMessage: '停止中にClearを実行してください。' })
       return
     }
@@ -3838,6 +4287,10 @@ export function bootstrapApp(): void {
         errorMessage: toErrorMessage(error, 'データのクリアに失敗しました。'),
       })
     }
+  })
+
+  elements.normalizeAmplitudeButton.addEventListener('click', () => {
+    void normalizeAmplitudeUsingVisibleRange()
   })
 
   elements.playbackToggleButton.addEventListener('click', async () => {
@@ -3907,6 +4360,10 @@ export function bootstrapApp(): void {
       window.clearTimeout(fftRefreshTimeoutId)
       fftRefreshTimeoutId = null
     }
+    if (waveformRefreshTimeoutId !== null) {
+      window.clearTimeout(waveformRefreshTimeoutId)
+      waveformRefreshTimeoutId = null
+    }
     clearFileRenderThrottle()
 
     void stopVisualization()
@@ -3938,6 +4395,7 @@ export function bootstrapApp(): void {
   if (resizeObserver) {
     resizeObserver.observe(elements.canvas)
     resizeObserver.observe(elements.fftCanvas)
+    resizeObserver.observe(elements.waveformCanvas)
   }
 
   window.addEventListener('resize', () => {

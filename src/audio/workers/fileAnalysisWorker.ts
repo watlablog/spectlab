@@ -1,5 +1,11 @@
 import { createStftTransformer, type StftTransformer } from '../stft'
 import type { FrameSize } from '../../app/types'
+import {
+  buildWaveformEnvelope,
+  createWaveformEnvelopeIndex,
+  type WaveformEnvelopeIndex,
+  type WaveformEnvelopeRequest,
+} from '../waveform'
 
 const SILENCE_DECIBELS = -160
 const MIN_OVERLAP_PERCENT = 0
@@ -29,11 +35,16 @@ interface SliceAudioMessage {
   timeMaxSec: number
 }
 
+interface WaveformEnvelopeMessage extends WaveformEnvelopeRequest {
+  type: 'waveform-envelope'
+  requestId: number
+}
+
 interface ClearMessage {
   type: 'clear'
 }
 
-type WorkerRequestMessage = LoadFileMessage | RenderWindowMessage | SliceAudioMessage | ClearMessage
+type WorkerRequestMessage = LoadFileMessage | RenderWindowMessage | SliceAudioMessage | WaveformEnvelopeMessage | ClearMessage
 
 interface LoadFileResponseMessage {
   type: 'load-file-response'
@@ -58,6 +69,13 @@ interface SliceAudioResponseMessage {
   sampleRateHz: number
 }
 
+interface WaveformEnvelopeResponseMessage {
+  type: 'waveform-envelope-response'
+  requestId: number
+  minValues: Float32Array
+  maxValues: Float32Array
+}
+
 interface ErrorMessage {
   type: 'error'
   requestId?: number
@@ -69,6 +87,7 @@ const scope = self as unknown as Worker
 let loadedSamples = new Float32Array(0)
 let loadedSampleRateHz = 0
 let loadedDurationSec = 0
+let waveformIndex: WaveformEnvelopeIndex | null = null
 
 let transformer: StftTransformer | null = null
 let transformerFrameSize: FrameSize | null = null
@@ -110,6 +129,7 @@ function handleLoadFile(message: LoadFileMessage): void {
   loadedSamples.set(message.samples, 0)
   loadedSampleRateHz = Math.max(1, message.sampleRateHz)
   loadedDurationSec = loadedSamples.length / loadedSampleRateHz
+  waveformIndex = createWaveformEnvelopeIndex(loadedSamples)
 
   const response: LoadFileResponseMessage = {
     type: 'load-file-response',
@@ -213,10 +233,50 @@ function handleSliceAudio(message: SliceAudioMessage): void {
   scope.postMessage(response)
 }
 
+function handleWaveformEnvelope(message: WaveformEnvelopeMessage): void {
+  const columnCount = Math.max(1, Math.round(message.columnCount))
+  if (loadedSampleRateHz <= 0 || loadedSamples.length <= 0 || !waveformIndex) {
+    const minValues = new Float32Array(columnCount)
+    const maxValues = new Float32Array(columnCount)
+    minValues.fill(Number.NaN)
+    maxValues.fill(Number.NaN)
+    const emptyResponse: WaveformEnvelopeResponseMessage = {
+      type: 'waveform-envelope-response',
+      requestId: message.requestId,
+      minValues,
+      maxValues,
+    }
+    scope.postMessage(emptyResponse, [minValues.buffer, maxValues.buffer])
+    return
+  }
+
+  const domainMaxSec = Math.max(1 / loadedSampleRateHz, loadedDurationSec)
+  const timeMinSec = clamp(message.timeMinSec, 0, domainMaxSec)
+  const timeMaxSec = clamp(message.timeMaxSec, timeMinSec + 1 / loadedSampleRateHz, domainMaxSec)
+  const startSample = clamp(Math.floor(timeMinSec * loadedSampleRateHz), 0, loadedSamples.length)
+  const endSample = clamp(Math.ceil(timeMaxSec * loadedSampleRateHz), startSample + 1, loadedSamples.length)
+  const envelope = buildWaveformEnvelope(
+    startSample,
+    endSample,
+    0,
+    loadedSamples.length,
+    columnCount,
+    (start, end) => waveformIndex?.readRange(start, end) ?? null,
+  )
+  const response: WaveformEnvelopeResponseMessage = {
+    type: 'waveform-envelope-response',
+    requestId: message.requestId,
+    minValues: envelope.minValues,
+    maxValues: envelope.maxValues,
+  }
+  scope.postMessage(response, [envelope.minValues.buffer, envelope.maxValues.buffer])
+}
+
 function clearLoadedAudio(): void {
   loadedSamples = new Float32Array(0)
   loadedSampleRateHz = 0
   loadedDurationSec = 0
+  waveformIndex = null
 }
 
 scope.onmessage = (event: MessageEvent<WorkerRequestMessage>) => {
@@ -235,6 +295,9 @@ scope.onmessage = (event: MessageEvent<WorkerRequestMessage>) => {
         break
       case 'slice-audio':
         handleSliceAudio(data)
+        break
+      case 'waveform-envelope':
+        handleWaveformEnvelope(data)
         break
       case 'clear':
         clearLoadedAudio()

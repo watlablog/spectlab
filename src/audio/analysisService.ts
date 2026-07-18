@@ -1,5 +1,6 @@
 import type { FrameSize } from '../app/types'
 import AnalysisWorker from './workers/analysisWorker?worker'
+import type { WaveformEnvelopeRequest, WaveformEnvelopeResult } from './waveform'
 const ANALYSIS_SAMPLE_RATE_HZ = 48_000
 
 export interface AnalysisCaptureChunk {
@@ -61,12 +62,18 @@ interface ClearMessage {
   type: 'clear'
 }
 
+interface WaveformEnvelopeRequestMessage extends WaveformEnvelopeRequest {
+  type: 'waveform-envelope'
+  requestId: number
+}
+
 type RequestMessage =
   | ConfigureMessage
   | SetPlotWidthMessage
   | CaptureChunkMessage
   | SnapshotRequestMessage
   | FinalizeRequestMessage
+  | WaveformEnvelopeRequestMessage
   | ClearMessage
 
 interface ColumnMessage {
@@ -91,10 +98,21 @@ interface ErrorMessage {
   message: string
 }
 
-type ResponseMessage = ColumnMessage | SnapshotResponseMessage | ErrorMessage
+interface WaveformEnvelopeResponseMessage extends WaveformEnvelopeResult {
+  type: 'waveform-envelope-response'
+  requestId: number
+}
+
+type ResponseMessage = ColumnMessage | SnapshotResponseMessage | WaveformEnvelopeResponseMessage | ErrorMessage
 
 interface PendingRequest {
   resolve: (snapshot: AnalysisSnapshot) => void
+  reject: (error: Error) => void
+  timeoutId: number
+}
+
+interface PendingWaveformRequest {
+  resolve: (result: WaveformEnvelopeResult) => void
   reject: (error: Error) => void
   timeoutId: number
 }
@@ -105,6 +123,7 @@ export interface AnalysisService {
   pushCaptureChunk(chunk: AnalysisCaptureChunk): void
   subscribeColumns(cb: (column: AnalysisColumn) => void): () => void
   requestHistorySnapshot(): Promise<AnalysisSnapshot>
+  requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult>
   stopAndFinalize(): Promise<AnalysisSnapshot>
   clear(): void
   getSampleRateHz(): number
@@ -115,6 +134,7 @@ class WorkerAnalysisService implements AnalysisService {
   private readonly worker: Worker
   private readonly columnSubscribers = new Set<(column: AnalysisColumn) => void>()
   private readonly pendingRequests = new Map<number, PendingRequest>()
+  private readonly pendingWaveformRequests = new Map<number, PendingWaveformRequest>()
   private requestId = 1
 
   constructor() {
@@ -154,12 +174,31 @@ class WorkerAnalysisService implements AnalysisService {
         return
       }
 
+      if (data.type === 'waveform-envelope-response') {
+        const pending = this.pendingWaveformRequests.get(data.requestId)
+        if (!pending) {
+          return
+        }
+        this.pendingWaveformRequests.delete(data.requestId)
+        window.clearTimeout(pending.timeoutId)
+        pending.resolve({
+          minValues: data.minValues,
+          maxValues: data.maxValues,
+        })
+        return
+      }
+
       if (data.type === 'error') {
         for (const [, pending] of this.pendingRequests) {
           window.clearTimeout(pending.timeoutId)
           pending.reject(new Error(data.message))
         }
         this.pendingRequests.clear()
+        for (const [, pending] of this.pendingWaveformRequests) {
+          window.clearTimeout(pending.timeoutId)
+          pending.reject(new Error(data.message))
+        }
+        this.pendingWaveformRequests.clear()
       }
     })
     this.worker.addEventListener('error', (event) => {
@@ -169,6 +208,11 @@ class WorkerAnalysisService implements AnalysisService {
         pending.reject(new Error(message))
       }
       this.pendingRequests.clear()
+      for (const [, pending] of this.pendingWaveformRequests) {
+        window.clearTimeout(pending.timeoutId)
+        pending.reject(new Error(message))
+      }
+      this.pendingWaveformRequests.clear()
     })
   }
 
@@ -212,6 +256,29 @@ class WorkerAnalysisService implements AnalysisService {
     return this.requestSnapshot('snapshot')
   }
 
+  requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult> {
+    return new Promise<WaveformEnvelopeResult>((resolve, reject) => {
+      const requestId = this.requestId
+      this.requestId += 1
+      const timeoutId = window.setTimeout(() => {
+        const pending = this.pendingWaveformRequests.get(requestId)
+        if (!pending) {
+          return
+        }
+        this.pendingWaveformRequests.delete(requestId)
+        pending.reject(new Error('Analysis worker timeout (waveform-envelope).'))
+      }, 3000)
+      this.pendingWaveformRequests.set(requestId, { resolve, reject, timeoutId })
+      this.postMessage({
+        type: 'waveform-envelope',
+        requestId,
+        timeMinSec: request.timeMinSec,
+        timeMaxSec: request.timeMaxSec,
+        columnCount: Math.max(1, Math.round(request.columnCount)),
+      })
+    })
+  }
+
   stopAndFinalize(): Promise<AnalysisSnapshot> {
     return this.requestSnapshot('finalize')
   }
@@ -230,6 +297,11 @@ class WorkerAnalysisService implements AnalysisService {
       pending.reject(new Error('Analysis worker disposed.'))
     }
     this.pendingRequests.clear()
+    for (const [, pending] of this.pendingWaveformRequests) {
+      window.clearTimeout(pending.timeoutId)
+      pending.reject(new Error('Analysis worker disposed.'))
+    }
+    this.pendingWaveformRequests.clear()
     this.columnSubscribers.clear()
     this.worker.terminate()
   }
