@@ -110,7 +110,7 @@ class Radix2StftTransformer implements StftTransformer {
   transform(frame: Float32Array): Float32Array {
     for (let index = 0; index < this.frameSize; index += 1) {
       const sourceSample = index < frame.length ? (frame[index] ?? 0) : 0
-      const sample = Math.max(-1, Math.min(1, sourceSample))
+      const sample = Number.isFinite(sourceSample) ? sourceSample : 0
       const windowedSample = sample * (this.window[index] ?? 0)
       const reversedIndex = this.bitReversedTable[index] ?? 0
       this.fftReal[reversedIndex] = windowedSample

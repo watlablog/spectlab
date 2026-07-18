@@ -1,5 +1,6 @@
 import type { FrameSize } from '../app/types'
 import AnalysisWorker from './workers/analysisWorker?worker'
+import type { AudioFilterConfig, AudioFilterProgress } from './filter'
 import type { WaveformEnvelopeRequest, WaveformEnvelopeResult } from './waveform'
 const ANALYSIS_SAMPLE_RATE_HZ = 48_000
 
@@ -67,6 +68,13 @@ interface WaveformEnvelopeRequestMessage extends WaveformEnvelopeRequest {
   requestId: number
 }
 
+interface SetAudioFilterMessage {
+  type: 'set-audio-filter'
+  requestId: number
+  generation: number
+  configs: AudioFilterConfig[]
+}
+
 type RequestMessage =
   | ConfigureMessage
   | SetPlotWidthMessage
@@ -74,6 +82,7 @@ type RequestMessage =
   | SnapshotRequestMessage
   | FinalizeRequestMessage
   | WaveformEnvelopeRequestMessage
+  | SetAudioFilterMessage
   | ClearMessage
 
 interface ColumnMessage {
@@ -83,7 +92,7 @@ interface ColumnMessage {
 }
 
 interface SnapshotResponseMessage {
-  type: 'snapshot-response'
+  type: 'snapshot-response' | 'set-audio-filter-response'
   requestId: number
   history: Float32Array
   count: number
@@ -91,6 +100,10 @@ interface SnapshotResponseMessage {
   pcmWindow48k: Float32Array
   capturedSamples48k: number
   sampleRateHz: number
+}
+
+interface AudioFilterProgressMessage extends AudioFilterProgress {
+  type: 'audio-filter-progress'
 }
 
 interface ErrorMessage {
@@ -103,7 +116,12 @@ interface WaveformEnvelopeResponseMessage extends WaveformEnvelopeResult {
   requestId: number
 }
 
-type ResponseMessage = ColumnMessage | SnapshotResponseMessage | WaveformEnvelopeResponseMessage | ErrorMessage
+type ResponseMessage =
+  | ColumnMessage
+  | SnapshotResponseMessage
+  | WaveformEnvelopeResponseMessage
+  | AudioFilterProgressMessage
+  | ErrorMessage
 
 interface PendingRequest {
   resolve: (snapshot: AnalysisSnapshot) => void
@@ -124,6 +142,8 @@ export interface AnalysisService {
   subscribeColumns(cb: (column: AnalysisColumn) => void): () => void
   requestHistorySnapshot(): Promise<AnalysisSnapshot>
   requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult>
+  setAudioFilters(configs: AudioFilterConfig[], generation: number): Promise<AnalysisSnapshot>
+  subscribeAudioFilterProgress(cb: (progress: AudioFilterProgress) => void): () => void
   stopAndFinalize(): Promise<AnalysisSnapshot>
   clear(): void
   getSampleRateHz(): number
@@ -133,6 +153,7 @@ export interface AnalysisService {
 class WorkerAnalysisService implements AnalysisService {
   private readonly worker: Worker
   private readonly columnSubscribers = new Set<(column: AnalysisColumn) => void>()
+  private readonly filterProgressSubscribers = new Set<(progress: AudioFilterProgress) => void>()
   private readonly pendingRequests = new Map<number, PendingRequest>()
   private readonly pendingWaveformRequests = new Map<number, PendingWaveformRequest>()
   private requestId = 1
@@ -156,7 +177,15 @@ class WorkerAnalysisService implements AnalysisService {
         return
       }
 
-      if (data.type === 'snapshot-response') {
+      if (data.type === 'audio-filter-progress') {
+        const progress = { generation: data.generation, percent: data.percent }
+        for (const subscriber of this.filterProgressSubscribers) {
+          subscriber(progress)
+        }
+        return
+      }
+
+      if (data.type === 'snapshot-response' || data.type === 'set-audio-filter-response') {
         const pending = this.pendingRequests.get(data.requestId)
         if (!pending) {
           return
@@ -279,6 +308,30 @@ class WorkerAnalysisService implements AnalysisService {
     })
   }
 
+  setAudioFilters(configs: AudioFilterConfig[], generation: number): Promise<AnalysisSnapshot> {
+    return new Promise<AnalysisSnapshot>((resolve, reject) => {
+      const requestId = this.requestId
+      this.requestId += 1
+      const timeoutId = window.setTimeout(() => {
+        const pending = this.pendingRequests.get(requestId)
+        if (!pending) {
+          return
+        }
+        this.pendingRequests.delete(requestId)
+        pending.reject(new Error('Analysis worker timeout (set-audio-filter).'))
+      }, 30_000)
+      this.pendingRequests.set(requestId, { resolve, reject, timeoutId })
+      this.postMessage({ type: 'set-audio-filter', requestId, generation, configs })
+    })
+  }
+
+  subscribeAudioFilterProgress(cb: (progress: AudioFilterProgress) => void): () => void {
+    this.filterProgressSubscribers.add(cb)
+    return () => {
+      this.filterProgressSubscribers.delete(cb)
+    }
+  }
+
   stopAndFinalize(): Promise<AnalysisSnapshot> {
     return this.requestSnapshot('finalize')
   }
@@ -303,6 +356,7 @@ class WorkerAnalysisService implements AnalysisService {
     }
     this.pendingWaveformRequests.clear()
     this.columnSubscribers.clear()
+    this.filterProgressSubscribers.clear()
     this.worker.terminate()
   }
 

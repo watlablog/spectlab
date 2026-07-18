@@ -50,10 +50,6 @@
                   <span id="clear-action-icon" class="action-icon" aria-hidden="true"></span>
                   <span class="action-label">Clear</span>
                 </button>
-                <button id="normalize-amplitude-button" class="btn graph-action-button" type="button" aria-label="Normalize amplitude using visible range">
-                  <span id="normalize-amplitude-action-icon" class="action-icon" aria-hidden="true"></span>
-                  <span class="action-label">Norm.Amp</span>
-                </button>
               </div>
               <div class="graph-action-group">
                 <button id="save-button" class="btn graph-action-button" type="button">
@@ -198,22 +194,69 @@
                 <input id="time-max-input" type="number" step="0.1" inputmode="decimal" />
               </label>
             </div>
-            <section class="fft-profile-panel" aria-label="FFT profile panel">
-              <div class="fft-profile-header">
-                <p class="fft-profile-title">FFT Profile</p>
-                <button id="fft-average-toggle-button" class="btn fft-average-toggle-button" type="button">
-                  Average FFT
-                </button>
+            <section class="lower-workspace" aria-label="Audio detail and signal processing workspace">
+              <aside class="signal-processing-panel" aria-labelledby="signal-processing-title">
+                <h2 id="signal-processing-title" class="workspace-title">Signal Processing</h2>
+                <section class="processing-group" aria-labelledby="level-processing-title">
+                  <h3 id="level-processing-title" class="processing-group-title">Level</h3>
+                  <button id="normalize-amplitude-button" class="btn processing-action-button" type="button" aria-label="Normalize amplitude using visible range">
+                    <span id="normalize-amplitude-action-icon" class="action-icon" aria-hidden="true"></span>
+                    <span>Norm.Amp</span>
+                  </button>
+                  <p id="waveform-normalization-status" class="waveform-normalization-status" aria-live="polite">Gain ×1</p>
+                </section>
+                <section class="processing-group" aria-labelledby="filter-processing-title">
+                  <h3 id="filter-processing-title" class="processing-group-title">Filter</h3>
+                  <div id="filter-type-controls" class="filter-type-controls" role="group" aria-label="Filter type">
+                    <button id="filter-type-lowpass" class="filter-type-button" type="button" data-filter-type="lowpass">Lowpass</button>
+                    <button id="filter-type-highpass" class="filter-type-button" type="button" data-filter-type="highpass">Highpass</button>
+                    <button id="filter-type-bandpass" class="filter-type-button" type="button" data-filter-type="bandpass">Bandpass</button>
+                    <button id="filter-type-bandstop" class="filter-type-button" type="button" data-filter-type="bandstop">Bandstop</button>
+                  </div>
+                  <div id="filter-single-cutoff-fields" class="filter-parameter-fields">
+                    <label class="filter-number-field" for="filter-cutoff-input">
+                      <span>Cutoff [Hz]</span>
+                      <input id="filter-cutoff-input" type="number" min="1" step="1" inputmode="numeric" />
+                    </label>
+                    <input id="filter-cutoff-slider" class="filter-log-slider" type="range" min="0" max="1000" step="1" aria-label="Cutoff frequency" />
+                  </div>
+                  <div id="filter-band-cutoff-fields" class="filter-parameter-fields" hidden>
+                    <label class="filter-number-field" for="filter-low-cutoff-input">
+                      <span>Low [Hz]</span>
+                      <input id="filter-low-cutoff-input" type="number" min="1" step="1" inputmode="numeric" />
+                    </label>
+                    <input id="filter-low-cutoff-slider" class="filter-log-slider" type="range" min="0" max="1000" step="1" aria-label="Low cutoff frequency" />
+                    <label class="filter-number-field" for="filter-high-cutoff-input">
+                      <span>High [Hz]</span>
+                      <input id="filter-high-cutoff-input" type="number" min="1" step="1" inputmode="numeric" />
+                    </label>
+                    <input id="filter-high-cutoff-slider" class="filter-log-slider" type="range" min="0" max="1000" step="1" aria-label="High cutoff frequency" />
+                  </div>
+                  <div id="filter-progress-track" class="filter-progress-track" role="progressbar" aria-label="Filter processing progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                    <div id="filter-progress-fill" class="filter-progress-fill"></div>
+                  </div>
+                  <div class="filter-action-row">
+                    <button id="filter-apply-button" class="btn processing-action-button" type="button">Apply</button>
+                    <button id="filter-remove-button" class="btn processing-action-button" type="button">Remove Filter</button>
+                  </div>
+                </section>
+              </aside>
+              <div class="detail-workspace">
+                <div class="detail-tabs" role="tablist" aria-label="Audio detail view">
+                  <button id="detail-waveform-tab" class="detail-tab" type="button" role="tab" aria-selected="false" aria-controls="detail-waveform-panel" tabindex="-1">Time waveform</button>
+                  <button id="detail-fft-tab" class="detail-tab" type="button" role="tab" aria-selected="true" aria-controls="detail-fft-panel" tabindex="0">FFT Profile</button>
+                </div>
+                <section id="detail-waveform-panel" class="time-waveform-panel detail-tab-panel" role="tabpanel" aria-labelledby="detail-waveform-tab" hidden>
+                  <canvas id="waveform-canvas" width="960" height="190" aria-label="時間波形"></canvas>
+                </section>
+                <section id="detail-fft-panel" class="fft-profile-panel detail-tab-panel" role="tabpanel" aria-labelledby="detail-fft-tab">
+                  <div class="fft-profile-header">
+                    <p id="fft-status-label" class="fft-status-label">single @ 10.000 s</p>
+                    <button id="fft-average-toggle-button" class="btn fft-average-toggle-button" type="button">Average FFT</button>
+                  </div>
+                  <canvas id="fft-canvas" width="960" height="190" aria-label="FFT profile"></canvas>
+                </section>
               </div>
-              <p id="fft-status-label" class="fft-status-label">single @ 10.000 s</p>
-              <canvas id="fft-canvas" width="960" height="190" aria-label="FFT profile"></canvas>
-            </section>
-            <section class="time-waveform-panel" aria-label="Time waveform panel">
-              <div class="time-waveform-header">
-                <p class="time-waveform-title">Time waveform</p>
-                <p id="waveform-normalization-status" class="waveform-normalization-status" aria-live="polite" hidden></p>
-              </div>
-              <canvas id="waveform-canvas" width="960" height="190" aria-label="時間波形"></canvas>
             </section>
           </div>
         </section>

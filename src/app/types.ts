@@ -1,7 +1,19 @@
 import type { ColormapId } from '../render/colorMap'
+import type { AudioFilterConfig, AudioFilterType } from '../audio/filter'
 
 export type FrameSize = 512 | 1024 | 2048 | 4096 | 8192
 export type UpperFrequencyHz = 5000 | 10000 | 20000
+export type DetailView = 'waveform' | 'fft'
+
+export interface AudioFilterDraft {
+  type: AudioFilterType
+  lowpassCutoffHz: number
+  highpassCutoffHz: number
+  bandpassLowCutoffHz: number
+  bandpassHighCutoffHz: number
+  bandstopLowCutoffHz: number
+  bandstopHighCutoffHz: number
+}
 
 export interface AppState {
   analysisSource: 'live' | 'file'
@@ -13,6 +25,12 @@ export interface AppState {
   isAmplitudeNormalizationApplied: boolean
   amplitudeNormalizationGain: number
   normalizedGlobalPeakAbs: number | null
+  detailView: DetailView
+  audioFilterDraft: AudioFilterDraft
+  audioFilterChain: AudioFilterConfig[]
+  audioFilterUndoDepth: 0 | 1
+  isApplyingAudioFilter: boolean
+  audioFilterProgressPercent: number | null
   hasMicPermission: boolean
   audioReady: boolean
   loadedAudioName: string | null

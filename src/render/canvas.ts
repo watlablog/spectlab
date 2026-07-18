@@ -10,21 +10,22 @@ const LABEL_COLOR = 'rgb(166 189 220)'
 const CURSOR_SINGLE_COLOR = 'rgb(255 214 92)'
 const CURSOR_MIN_COLOR = 'rgb(255 165 102)'
 const CURSOR_MAX_COLOR = 'rgb(128 226 255)'
-const TICK_SIZE_PX = 6
+const TICK_SIZE_CSS_PX = 7
+const FONT_FAMILY = '"Times New Roman", Times, serif'
 const SPECTROGRAM_VERTICAL_SMOOTH_ALPHA = 0.42
 
 const DESKTOP_MARGINS = {
-  left: 64,
-  right: 10,
+  left: 78,
+  right: 12,
   top: 12,
-  bottom: 36,
+  bottom: 48,
 }
 
 const MOBILE_MARGINS = {
-  left: 52,
-  right: 8,
-  top: 10,
-  bottom: 32,
+  left: 66,
+  right: 10,
+  top: 12,
+  bottom: 44,
 }
 
 const DEFAULT_AXIS_CONFIG: AxisRenderConfig = {
@@ -178,7 +179,13 @@ class SpectrogramRenderer implements Renderer {
 
     const displayWidth = Math.max(1, Math.floor(this.canvas.clientWidth * dpr))
     const displayHeight = Math.max(1, Math.floor(this.canvas.clientHeight * dpr))
-    const margins = mobile ? MOBILE_MARGINS : DESKTOP_MARGINS
+    const cssMargins = mobile ? MOBILE_MARGINS : DESKTOP_MARGINS
+    const margins = {
+      left: cssMargins.left * dpr,
+      right: cssMargins.right * dpr,
+      top: cssMargins.top * dpr,
+      bottom: cssMargins.bottom * dpr,
+    }
 
     const plotWidth = Math.max(1, displayWidth - margins.left - margins.right)
     const plotHeight = Math.max(1, displayHeight - margins.top - margins.bottom)
@@ -381,6 +388,8 @@ class SpectrogramRenderer implements Renderer {
     const safeTickCount = Math.max(2, yTickCount)
     const safeWindowSec = Math.max(0.1, timeWindowSec)
     const spanHz = Math.max(1, frequencyMaxHz - frequencyMinHz)
+    const fontSize = (isMobileViewport() ? 14 : 16) * this.metrics.dpr
+    const tickSize = TICK_SIZE_CSS_PX * this.metrics.dpr
 
     this.axesCtx.clearRect(0, 0, canvasWidth, canvasHeight)
 
@@ -405,7 +414,7 @@ class SpectrogramRenderer implements Renderer {
     }
 
     this.axesCtx.fillStyle = LABEL_COLOR
-    this.axesCtx.font = '12px "Avenir Next", "Yu Gothic", sans-serif'
+    this.axesCtx.font = `${fontSize}px ${FONT_FAMILY}`
     this.axesCtx.textBaseline = 'middle'
 
     for (let index = 0; index < safeTickCount; index += 1) {
@@ -415,12 +424,16 @@ class SpectrogramRenderer implements Renderer {
 
       this.axesCtx.strokeStyle = AXIS_COLOR
       this.axesCtx.beginPath()
-      this.axesCtx.moveTo(plotX - TICK_SIZE_PX, y + 0.5)
+      this.axesCtx.moveTo(plotX - tickSize, y + 0.5)
       this.axesCtx.lineTo(plotX + 0.5, y + 0.5)
       this.axesCtx.stroke()
 
       this.axesCtx.textAlign = 'right'
-      this.axesCtx.fillText(this.numberFormatter.format(Math.max(0, valueHz)), plotX - TICK_SIZE_PX - 4, y)
+      this.axesCtx.fillText(
+        this.numberFormatter.format(Math.max(0, valueHz)),
+        plotX - tickSize - 5 * this.metrics.dpr,
+        y,
+      )
     }
 
     this.axesCtx.textBaseline = 'top'
@@ -432,7 +445,7 @@ class SpectrogramRenderer implements Renderer {
       this.axesCtx.strokeStyle = AXIS_COLOR
       this.axesCtx.beginPath()
       this.axesCtx.moveTo(x + 0.5, plotY + plotHeight - 0.5)
-      this.axesCtx.lineTo(x + 0.5, plotY + plotHeight + TICK_SIZE_PX)
+      this.axesCtx.lineTo(x + 0.5, plotY + plotHeight + tickSize)
       this.axesCtx.stroke()
 
       if (index === 0) {
@@ -447,15 +460,15 @@ class SpectrogramRenderer implements Renderer {
         Math.abs(labelValue - Math.round(labelValue)) < 1e-6
           ? String(Math.round(labelValue))
           : labelValue.toFixed(1)
-      this.axesCtx.fillText(tickLabel, x, plotY + plotHeight + TICK_SIZE_PX + 3)
+      this.axesCtx.fillText(tickLabel, x, plotY + plotHeight + tickSize + 4 * this.metrics.dpr)
     }
 
     this.axesCtx.textAlign = 'right'
     this.axesCtx.textBaseline = 'alphabetic'
-    this.axesCtx.fillText('Time [s]', plotX + plotWidth, canvasHeight - 4)
+    this.axesCtx.fillText('Time [s]', plotX + plotWidth, canvasHeight - 5 * this.metrics.dpr)
 
     this.axesCtx.save()
-    this.axesCtx.translate(16, plotY + plotHeight / 2)
+    this.axesCtx.translate(19 * this.metrics.dpr, plotY + plotHeight / 2)
     this.axesCtx.rotate(-Math.PI / 2)
     this.axesCtx.textAlign = 'center'
     this.axesCtx.textBaseline = 'alphabetic'
@@ -495,7 +508,7 @@ class SpectrogramRenderer implements Renderer {
       const ratio = clamp((seconds - visibleMinSec) / safeWindowSec, 0, 1)
       const x = Math.round(plotX + ratio * plotWidth) + 0.5
       ctx.strokeStyle = color
-      ctx.lineWidth = 1.5
+      ctx.lineWidth = Math.max(1.5, 1.5 * this.metrics.dpr)
       ctx.beginPath()
       ctx.moveTo(x, plotY + 0.5)
       ctx.lineTo(x, plotY + plotHeight - 0.5)

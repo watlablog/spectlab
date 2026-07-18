@@ -1,5 +1,6 @@
 import type { FrameSize } from '../app/types'
 import FileAnalysisWorker from './workers/fileAnalysisWorker?worker'
+import type { AudioFilterConfig, AudioFilterProgress } from './filter'
 import type { WaveformEnvelopeRequest, WaveformEnvelopeResult } from './waveform'
 
 export interface FileLoadResult {
@@ -56,6 +57,13 @@ interface WaveformEnvelopeRequestMessage extends WaveformEnvelopeRequest {
   requestId: number
 }
 
+interface SetAudioFilterMessage {
+  type: 'set-audio-filter'
+  requestId: number
+  generation: number
+  configs: AudioFilterConfig[]
+}
+
 interface ClearMessage {
   type: 'clear'
 }
@@ -65,6 +73,7 @@ type WorkerRequestMessage =
   | RenderWindowMessage
   | SliceAudioMessage
   | WaveformEnvelopeRequestMessage
+  | SetAudioFilterMessage
   | ClearMessage
 
 interface LoadFileResponseMessage {
@@ -95,6 +104,15 @@ interface WaveformEnvelopeResponseMessage extends WaveformEnvelopeResult {
   requestId: number
 }
 
+interface SetAudioFilterResponseMessage {
+  type: 'set-audio-filter-response'
+  requestId: number
+}
+
+interface AudioFilterProgressMessage extends AudioFilterProgress {
+  type: 'audio-filter-progress'
+}
+
 interface ErrorMessage {
   type: 'error'
   requestId?: number
@@ -106,9 +124,11 @@ type WorkerResponseMessage =
   | RenderWindowResponseMessage
   | SliceAudioResponseMessage
   | WaveformEnvelopeResponseMessage
+  | SetAudioFilterResponseMessage
+  | AudioFilterProgressMessage
   | ErrorMessage
 
-type PendingRequestKind = 'load' | 'render' | 'slice' | 'waveform'
+type PendingRequestKind = 'load' | 'render' | 'slice' | 'waveform' | 'filter'
 
 interface PendingRequest<T> {
   kind: PendingRequestKind
@@ -122,6 +142,8 @@ export interface FileAnalysisService {
   renderWindow(params: FileRenderParams): Promise<FileRenderResult>
   sliceAudio(timeMinSec: number, timeMaxSec: number): Promise<FileSliceResult | null>
   requestWaveformEnvelope(request: WaveformEnvelopeRequest): Promise<WaveformEnvelopeResult>
+  setAudioFilters(configs: AudioFilterConfig[], generation: number): Promise<void>
+  subscribeAudioFilterProgress(cb: (progress: AudioFilterProgress) => void): () => void
   clear(): void
   dispose(): void
 }
@@ -129,6 +151,7 @@ export interface FileAnalysisService {
 class WorkerFileAnalysisService implements FileAnalysisService {
   private readonly worker: Worker
   private readonly pendingRequests = new Map<number, PendingRequest<unknown>>()
+  private readonly filterProgressSubscribers = new Set<(progress: AudioFilterProgress) => void>()
   private requestId = 1
 
   constructor() {
@@ -155,6 +178,14 @@ class WorkerFileAnalysisService implements FileAnalysisService {
           this.pendingRequests.delete(requestId)
           window.clearTimeout(pending.timeoutId)
           pending.reject(new Error(data.message))
+        }
+        return
+      }
+
+      if (data.type === 'audio-filter-progress') {
+        const progress = { generation: data.generation, percent: data.percent }
+        for (const subscriber of this.filterProgressSubscribers) {
+          subscriber(progress)
         }
         return
       }
@@ -201,6 +232,11 @@ class WorkerFileAnalysisService implements FileAnalysisService {
           minValues: data.minValues,
           maxValues: data.maxValues,
         } satisfies WaveformEnvelopeResult)
+        return
+      }
+
+      if (data.type === 'set-audio-filter-response' && pending.kind === 'filter') {
+        pending.resolve(undefined)
       }
     })
 
@@ -275,6 +311,27 @@ class WorkerFileAnalysisService implements FileAnalysisService {
     )
   }
 
+  async setAudioFilters(configs: AudioFilterConfig[], generation: number): Promise<void> {
+    return this.request<void>(
+      'filter',
+      {
+        type: 'set-audio-filter',
+        requestId: this.allocateRequestId(),
+        generation,
+        configs,
+      },
+      [],
+      120_000,
+    )
+  }
+
+  subscribeAudioFilterProgress(cb: (progress: AudioFilterProgress) => void): () => void {
+    this.filterProgressSubscribers.add(cb)
+    return () => {
+      this.filterProgressSubscribers.delete(cb)
+    }
+  }
+
   clear(): void {
     this.postMessage({ type: 'clear' })
   }
@@ -285,6 +342,7 @@ class WorkerFileAnalysisService implements FileAnalysisService {
       window.clearTimeout(pending.timeoutId)
       pending.reject(new Error('File analysis worker disposed.'))
     }
+    this.filterProgressSubscribers.clear()
     this.worker.terminate()
   }
 

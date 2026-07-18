@@ -6,7 +6,11 @@ export function renderControlsView(
   state: AppState,
   hasSavableAudio: boolean,
 ): void {
-  const isBusy = state.isSavingAudio || state.isLoadingFile || state.isNormalizingAmplitude
+  const isBusy =
+    state.isSavingAudio ||
+    state.isLoadingFile ||
+    state.isNormalizingAmplitude ||
+    state.isApplyingAudioFilter
   elements.startButton.disabled = state.isPlayingBack || isBusy
   elements.startButton.classList.toggle('is-recording', state.isRecording)
   elements.startButton.setAttribute('aria-label', state.isRecording ? 'Stop recording' : 'Start recording')
@@ -25,6 +29,11 @@ export function renderControlsView(
 
   if (state.isNormalizingAmplitude) {
     elements.micStatus.textContent = '表示範囲から振幅を正規化しています。'
+    return
+  }
+
+  if (state.isApplyingAudioFilter) {
+    elements.micStatus.textContent = `フィルタ処理中です（${Math.round(state.audioFilterProgressPercent ?? 0)}%）。`
     return
   }
 

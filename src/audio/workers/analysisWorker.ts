@@ -1,5 +1,10 @@
 import { createStftTransformer, type StftTransformer } from '../stft'
 import type { FrameSize } from '../../app/types'
+import {
+  cloneAudioFilterConfig,
+  createBiquadCascadeProcessor,
+  type AudioFilterConfig,
+} from '../filter'
 import { buildWaveformEnvelope, type WaveformEnvelopeRequest } from '../waveform'
 
 const ANALYSIS_SAMPLE_RATE_HZ = 48_000
@@ -50,6 +55,13 @@ interface WaveformEnvelopeMessage extends WaveformEnvelopeRequest {
   requestId: number
 }
 
+interface SetAudioFilterMessage {
+  type: 'set-audio-filter'
+  requestId: number
+  generation: number
+  configs: AudioFilterConfig[]
+}
+
 interface ClearMessage {
   type: 'clear'
 }
@@ -61,6 +73,7 @@ type WorkerRequestMessage =
   | FinalizeMessage
   | SnapshotMessage
   | WaveformEnvelopeMessage
+  | SetAudioFilterMessage
   | ClearMessage
 
 interface ColumnMessage {
@@ -70,7 +83,7 @@ interface ColumnMessage {
 }
 
 interface SnapshotResponseMessage {
-  type: 'snapshot-response'
+  type: 'snapshot-response' | 'set-audio-filter-response'
   requestId: number
   history: Float32Array<ArrayBufferLike>
   count: number
@@ -78,6 +91,12 @@ interface SnapshotResponseMessage {
   pcmWindow48k: Float32Array<ArrayBufferLike>
   capturedSamples48k: number
   sampleRateHz: number
+}
+
+interface AudioFilterProgressMessage {
+  type: 'audio-filter-progress'
+  generation: number
+  percent: number
 }
 
 interface ErrorMessage {
@@ -92,7 +111,12 @@ interface WaveformEnvelopeResponseMessage {
   maxValues: Float32Array<ArrayBufferLike>
 }
 
-type WorkerResponseMessage = ColumnMessage | SnapshotResponseMessage | WaveformEnvelopeResponseMessage | ErrorMessage
+type WorkerResponseMessage =
+  | ColumnMessage
+  | SnapshotResponseMessage
+  | WaveformEnvelopeResponseMessage
+  | AudioFilterProgressMessage
+  | ErrorMessage
 
 const scope = self as unknown as Worker
 
@@ -111,6 +135,9 @@ let latestSpectrum: Float32Array = new Float32Array(silenceSpectrum)
 let pcmRing = new Float32Array(WINDOW_SAMPLES)
 let pcmHead = 0
 let capturedSamples48k = 0
+let activeFilterConfigs: AudioFilterConfig[] = []
+let filteredPcmWindow: Float32Array | null = null
+let filterOperationToken = 0
 
 let historyData: Float32Array<ArrayBufferLike> = new Float32Array(0)
 let historyCapacity = 0
@@ -264,7 +291,7 @@ function linearizeHistory(): Float32Array {
   return linear
 }
 
-function getPcmWindowChronological(): Float32Array {
+function getRawPcmWindowChronological(): Float32Array {
   const ordered = new Float32Array(WINDOW_SAMPLES)
   const firstChunkLength = WINDOW_SAMPLES - pcmHead
   ordered.set(pcmRing.subarray(pcmHead), 0)
@@ -272,6 +299,13 @@ function getPcmWindowChronological(): Float32Array {
     ordered.set(pcmRing.subarray(0, pcmHead), firstChunkLength)
   }
   return ordered
+}
+
+function getPcmWindowChronological(): Float32Array {
+  if (activeFilterConfigs.length > 0 && filteredPcmWindow) {
+    return new Float32Array(filteredPcmWindow)
+  }
+  return getRawPcmWindowChronological()
 }
 
 function readPcmWindowRange(startSample: number, endSample: number): readonly [number, number] | null {
@@ -283,8 +317,9 @@ function readPcmWindowRange(startSample: number, endSample: number): readonly [n
 
   let minValue = Number.POSITIVE_INFINITY
   let maxValue = Number.NEGATIVE_INFINITY
+  const effectiveWindow = activeFilterConfigs.length > 0 && filteredPcmWindow ? filteredPcmWindow : null
   for (let index = start; index < end; index += 1) {
-    const sample = pcmRing[(pcmHead + index) % WINDOW_SAMPLES] ?? 0
+    const sample = effectiveWindow?.[index] ?? pcmRing[(pcmHead + index) % WINDOW_SAMPLES] ?? 0
     if (!Number.isFinite(sample)) {
       continue
     }
@@ -369,6 +404,12 @@ function processPendingFrames(): void {
 function appendResampledChunk(samples: Float32Array): void {
   if (samples.length <= 0) {
     return
+  }
+
+  if (activeFilterConfigs.length > 0 || filteredPcmWindow) {
+    filterOperationToken += 1
+    activeFilterConfigs = []
+    filteredPcmWindow = null
   }
 
   for (let index = 0; index < samples.length; index += 1) {
@@ -519,6 +560,9 @@ function applyConfig(nextConfig: WorkerConfig): void {
 }
 
 function clearAll(): void {
+  filterOperationToken += 1
+  activeFilterConfigs = []
+  filteredPcmWindow = null
   pcmRing = new Float32Array(WINDOW_SAMPLES)
   pcmHead = 0
   capturedSamples48k = 0
@@ -539,11 +583,14 @@ function clearAll(): void {
   rebuildHistoryFromPcmWindow()
 }
 
-function postSnapshotResponse(requestId: number): void {
+function postSnapshotResponse(
+  requestId: number,
+  type: SnapshotResponseMessage['type'] = 'snapshot-response',
+): void {
   const history = linearizeHistory()
   const pcmWindow48k = getPcmWindowChronological()
   const response: SnapshotResponseMessage = {
-    type: 'snapshot-response',
+    type,
     requestId,
     history,
     count: historyCount,
@@ -553,6 +600,58 @@ function postSnapshotResponse(requestId: number): void {
     sampleRateHz: ANALYSIS_SAMPLE_RATE_HZ,
   }
   scope.postMessage(response, [history.buffer, pcmWindow48k.buffer])
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+function postFilterProgress(generation: number, percent: number): void {
+  scope.postMessage({
+    type: 'audio-filter-progress',
+    generation,
+    percent: clamp(Math.round(percent), 0, 100),
+  } satisfies AudioFilterProgressMessage)
+}
+
+async function handleSetAudioFilter(message: SetAudioFilterMessage): Promise<void> {
+  const operationToken = ++filterOperationToken
+  if (message.configs.length <= 0) {
+    activeFilterConfigs = []
+    filteredPcmWindow = null
+    rebuildHistoryFromPcmWindow()
+    postFilterProgress(message.generation, 100)
+    postSnapshotResponse(message.requestId, 'set-audio-filter-response')
+    return
+  }
+  if (capturedSamples48k <= 0) {
+    throw new Error('No audio is available to filter.')
+  }
+
+  const configsToApply = message.configs.map(cloneAudioFilterConfig)
+  const processor = createBiquadCascadeProcessor(configsToApply, ANALYSIS_SAMPLE_RATE_HZ)
+  const rawWindow = getRawPcmWindowChronological()
+  const filteredWindow = new Float32Array(rawWindow.length)
+  const chunkSamples = 65_536
+  postFilterProgress(message.generation, 0)
+  for (let start = 0; start < rawWindow.length; start += chunkSamples) {
+    const end = Math.min(rawWindow.length, start + chunkSamples)
+    for (let index = start; index < end; index += 1) {
+      filteredWindow[index] = processor.processSample(rawWindow[index] ?? 0)
+    }
+    postFilterProgress(message.generation, (end / rawWindow.length) * 100)
+    await yieldToEventLoop()
+    if (operationToken !== filterOperationToken) {
+      postSnapshotResponse(message.requestId, 'set-audio-filter-response')
+      return
+    }
+  }
+
+  activeFilterConfigs = configsToApply
+  filteredPcmWindow = filteredWindow
+  rebuildHistoryFromPcmWindow()
+  postFilterProgress(message.generation, 100)
+  postSnapshotResponse(message.requestId, 'set-audio-filter-response')
 }
 
 scope.onmessage = (event: MessageEvent<WorkerRequestMessage>) => {
@@ -590,6 +689,16 @@ scope.onmessage = (event: MessageEvent<WorkerRequestMessage>) => {
       }
       case 'waveform-envelope': {
         postWaveformEnvelope(data)
+        break
+      }
+      case 'set-audio-filter': {
+        void handleSetAudioFilter(data).catch((error) => {
+          const message: ErrorMessage = {
+            type: 'error',
+            message: error instanceof Error ? error.message : 'Filter processing failed.',
+          }
+          scope.postMessage(message satisfies WorkerResponseMessage)
+        })
         break
       }
       case 'finalize': {

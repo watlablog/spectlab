@@ -11,7 +11,7 @@ export interface WaveformEnvelopeResult {
 
 export type WaveformRangeReader = (startSample: number, endSample: number) => readonly [number, number] | null
 
-const FILE_INDEX_BASE_BLOCK_SAMPLES = 256
+export const WAVEFORM_INDEX_BASE_BLOCK_SAMPLES = 256
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
@@ -97,19 +97,12 @@ export interface WaveformEnvelopeIndex {
   readRange(startSample: number, endSample: number): readonly [number, number] | null
 }
 
-export function createWaveformEnvelopeIndex(samples: Float32Array): WaveformEnvelopeIndex {
-  const baseBlockCount = Math.ceil(samples.length / FILE_INDEX_BASE_BLOCK_SAMPLES)
-  const baseMinValues = new Float32Array(baseBlockCount)
-  const baseMaxValues = new Float32Array(baseBlockCount)
-
-  for (let block = 0; block < baseBlockCount; block += 1) {
-    const start = block * FILE_INDEX_BASE_BLOCK_SAMPLES
-    const end = Math.min(samples.length, start + FILE_INDEX_BASE_BLOCK_SAMPLES)
-    const range = readWaveformRangeDirect(samples, start, end)
-    baseMinValues[block] = range?.[0] ?? Number.NaN
-    baseMaxValues[block] = range?.[1] ?? Number.NaN
-  }
-
+export function createWaveformEnvelopeIndexFromBlocks(
+  sampleCount: number,
+  baseMinValues: Float32Array,
+  baseMaxValues: Float32Array,
+  readBoundaryRange: WaveformRangeReader,
+): WaveformEnvelopeIndex {
   const levels: WaveformIndexLevel[] = [{ minValues: baseMinValues, maxValues: baseMaxValues }]
   while ((levels.at(-1)?.minValues.length ?? 0) > 1) {
     const previous = levels.at(-1)
@@ -154,17 +147,20 @@ export function createWaveformEnvelopeIndex(samples: Float32Array): WaveformEnve
 
   return {
     readRange(startSample: number, endSample: number): readonly [number, number] | null {
-      const start = clamp(Math.floor(startSample), 0, samples.length)
-      const end = clamp(Math.ceil(endSample), start, samples.length)
+      const start = clamp(Math.floor(startSample), 0, sampleCount)
+      const end = clamp(Math.ceil(endSample), start, sampleCount)
       if (end <= start) {
         return null
       }
 
-      const firstFullBlock = Math.ceil(start / FILE_INDEX_BASE_BLOCK_SAMPLES)
-      const lastFullBlockExclusive = Math.floor(end / FILE_INDEX_BASE_BLOCK_SAMPLES)
-      const leftBoundaryEnd = Math.min(end, firstFullBlock * FILE_INDEX_BASE_BLOCK_SAMPLES)
-      const rightBoundaryStart = Math.max(leftBoundaryEnd, lastFullBlockExclusive * FILE_INDEX_BASE_BLOCK_SAMPLES)
-      let range = readWaveformRangeDirect(samples, start, leftBoundaryEnd)
+      const firstFullBlock = Math.ceil(start / WAVEFORM_INDEX_BASE_BLOCK_SAMPLES)
+      const lastFullBlockExclusive = Math.floor(end / WAVEFORM_INDEX_BASE_BLOCK_SAMPLES)
+      const leftBoundaryEnd = Math.min(end, firstFullBlock * WAVEFORM_INDEX_BASE_BLOCK_SAMPLES)
+      const rightBoundaryStart = Math.max(
+        leftBoundaryEnd,
+        lastFullBlockExclusive * WAVEFORM_INDEX_BASE_BLOCK_SAMPLES,
+      )
+      let range = readBoundaryRange(start, leftBoundaryEnd)
 
       let leftBlock = firstFullBlock
       let rightBlock = lastFullBlockExclusive
@@ -183,7 +179,7 @@ export function createWaveformEnvelopeIndex(samples: Float32Array): WaveformEnve
         levelIndex += 1
       }
 
-      const rightBoundary = readWaveformRangeDirect(samples, rightBoundaryStart, end)
+      const rightBoundary = readBoundaryRange(rightBoundaryStart, end)
       if (!rightBoundary) {
         return range
       }
@@ -193,4 +189,25 @@ export function createWaveformEnvelopeIndex(samples: Float32Array): WaveformEnve
       return [Math.min(range[0], rightBoundary[0]), Math.max(range[1], rightBoundary[1])]
     },
   }
+}
+
+export function createWaveformEnvelopeIndex(samples: Float32Array): WaveformEnvelopeIndex {
+  const baseBlockCount = Math.ceil(samples.length / WAVEFORM_INDEX_BASE_BLOCK_SAMPLES)
+  const baseMinValues = new Float32Array(baseBlockCount)
+  const baseMaxValues = new Float32Array(baseBlockCount)
+
+  for (let block = 0; block < baseBlockCount; block += 1) {
+    const start = block * WAVEFORM_INDEX_BASE_BLOCK_SAMPLES
+    const end = Math.min(samples.length, start + WAVEFORM_INDEX_BASE_BLOCK_SAMPLES)
+    const range = readWaveformRangeDirect(samples, start, end)
+    baseMinValues[block] = range?.[0] ?? Number.NaN
+    baseMaxValues[block] = range?.[1] ?? Number.NaN
+  }
+
+  return createWaveformEnvelopeIndexFromBlocks(
+    samples.length,
+    baseMinValues,
+    baseMaxValues,
+    (start, end) => readWaveformRangeDirect(samples, start, end),
+  )
 }

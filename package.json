@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "vitest run",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },
@@ -13,6 +14,7 @@
   },
   "devDependencies": {
     "typescript": "^5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "vitest": "^4.1.10"
   }
 }

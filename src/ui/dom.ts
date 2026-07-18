@@ -50,11 +50,31 @@ export interface UIElements {
   waveformNormalizationStatus: HTMLParagraphElement
   fftAverageToggleButton: HTMLButtonElement
   fftStatusLabel: HTMLParagraphElement
+  detailWaveformTab: HTMLButtonElement
+  detailFftTab: HTMLButtonElement
+  detailWaveformPanel: HTMLElement
+  detailFftPanel: HTMLElement
+  filterTypeLowpassButton: HTMLButtonElement
+  filterTypeHighpassButton: HTMLButtonElement
+  filterTypeBandpassButton: HTMLButtonElement
+  filterTypeBandstopButton: HTMLButtonElement
+  filterSingleCutoffFields: HTMLDivElement
+  filterBandCutoffFields: HTMLDivElement
+  filterCutoffInput: HTMLInputElement
+  filterCutoffSlider: HTMLInputElement
+  filterLowCutoffInput: HTMLInputElement
+  filterLowCutoffSlider: HTMLInputElement
+  filterHighCutoffInput: HTMLInputElement
+  filterHighCutoffSlider: HTMLInputElement
+  filterApplyButton: HTMLButtonElement
+  filterRemoveButton: HTMLButtonElement
+  filterProgressTrack: HTMLDivElement
+  filterProgressFill: HTMLDivElement
 }
 
 function getRequiredElement<T extends HTMLElement>(
   id: string,
-  typeName: 'canvas' | 'button' | 'paragraph' | 'div' | 'input' | 'select' | 'span',
+  typeName: 'canvas' | 'button' | 'paragraph' | 'div' | 'input' | 'select' | 'span' | 'element',
 ): T {
   const element = document.getElementById(id)
 
@@ -150,5 +170,25 @@ export function getUIElements(): UIElements {
     waveformNormalizationStatus: getRequiredElement<HTMLParagraphElement>('waveform-normalization-status', 'paragraph'),
     fftAverageToggleButton: getRequiredElement<HTMLButtonElement>('fft-average-toggle-button', 'button'),
     fftStatusLabel: getRequiredElement<HTMLParagraphElement>('fft-status-label', 'paragraph'),
+    detailWaveformTab: getRequiredElement<HTMLButtonElement>('detail-waveform-tab', 'button'),
+    detailFftTab: getRequiredElement<HTMLButtonElement>('detail-fft-tab', 'button'),
+    detailWaveformPanel: getRequiredElement<HTMLElement>('detail-waveform-panel', 'element'),
+    detailFftPanel: getRequiredElement<HTMLElement>('detail-fft-panel', 'element'),
+    filterTypeLowpassButton: getRequiredElement<HTMLButtonElement>('filter-type-lowpass', 'button'),
+    filterTypeHighpassButton: getRequiredElement<HTMLButtonElement>('filter-type-highpass', 'button'),
+    filterTypeBandpassButton: getRequiredElement<HTMLButtonElement>('filter-type-bandpass', 'button'),
+    filterTypeBandstopButton: getRequiredElement<HTMLButtonElement>('filter-type-bandstop', 'button'),
+    filterSingleCutoffFields: getRequiredElement<HTMLDivElement>('filter-single-cutoff-fields', 'div'),
+    filterBandCutoffFields: getRequiredElement<HTMLDivElement>('filter-band-cutoff-fields', 'div'),
+    filterCutoffInput: getRequiredElement<HTMLInputElement>('filter-cutoff-input', 'input'),
+    filterCutoffSlider: getRequiredElement<HTMLInputElement>('filter-cutoff-slider', 'input'),
+    filterLowCutoffInput: getRequiredElement<HTMLInputElement>('filter-low-cutoff-input', 'input'),
+    filterLowCutoffSlider: getRequiredElement<HTMLInputElement>('filter-low-cutoff-slider', 'input'),
+    filterHighCutoffInput: getRequiredElement<HTMLInputElement>('filter-high-cutoff-input', 'input'),
+    filterHighCutoffSlider: getRequiredElement<HTMLInputElement>('filter-high-cutoff-slider', 'input'),
+    filterApplyButton: getRequiredElement<HTMLButtonElement>('filter-apply-button', 'button'),
+    filterRemoveButton: getRequiredElement<HTMLButtonElement>('filter-remove-button', 'button'),
+    filterProgressTrack: getRequiredElement<HTMLDivElement>('filter-progress-track', 'div'),
+    filterProgressFill: getRequiredElement<HTMLDivElement>('filter-progress-fill', 'div'),
   }
 }

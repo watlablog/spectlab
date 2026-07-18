@@ -11,6 +11,13 @@ import {
 import { createWaveformRenderer, type WaveformRenderConfig } from '../render/waveform'
 import type { WaveformEnvelopeResult } from '../audio/waveform'
 import {
+  clampAudioFilterConfig,
+  getMaximumFilterFrequencyHz,
+  validateAudioFilterConfig,
+  type AudioFilterConfig,
+  type AudioFilterType,
+} from '../audio/filter'
+import {
   buildColormapGradient,
   COLORMAP_PRESETS,
   DEFAULT_COLORMAP_ID,
@@ -22,7 +29,7 @@ import { renderControlsView } from '../ui/controlsView'
 import { getUIElements } from '../ui/dom'
 import { isMicrophonePermissionError, toErrorMessage } from '../utils/errors'
 import { AudioWaveform, Circle, createElement as createLucideElement, Download, Eraser, Play, Square, Upload } from 'lucide'
-import type { AppState, FrameSize, UpperFrequencyHz } from './types'
+import type { AppState, AudioFilterDraft, DetailView, FrameSize, UpperFrequencyHz } from './types'
 
 const SPECTROGRAM_WINDOW_SECONDS = 10
 const TIME_DOMAIN_MIN_SEC = 0
@@ -75,6 +82,7 @@ const FILE_RENDER_THROTTLE_MS = 100
 const MAX_FILE_DURATION_SECONDS = 30 * 60
 const MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024
 const NO_REAL_DATA_RANGE_MESSAGE = '選択範囲に実データがありません。'
+const FILTER_LOG_SLIDER_MAX = 1000
 
 interface QualityProfile {
   renderFps: number
@@ -208,6 +216,77 @@ function normalizeRecordingRoute(): void {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max)
+}
+
+function getAudioFilterConfigFromDraft(draft: AudioFilterDraft): AudioFilterConfig {
+  switch (draft.type) {
+    case 'lowpass':
+      return { type: 'lowpass', cutoffHz: draft.lowpassCutoffHz }
+    case 'highpass':
+      return { type: 'highpass', cutoffHz: draft.highpassCutoffHz }
+    case 'bandpass':
+      return {
+        type: 'bandpass',
+        lowCutoffHz: draft.bandpassLowCutoffHz,
+        highCutoffHz: draft.bandpassHighCutoffHz,
+      }
+    case 'bandstop':
+      return {
+        type: 'bandstop',
+        lowCutoffHz: draft.bandstopLowCutoffHz,
+        highCutoffHz: draft.bandstopHighCutoffHz,
+      }
+  }
+}
+
+function clampAudioFilterDraft(draft: AudioFilterDraft, sampleRateHz: number): AudioFilterDraft {
+  const lowpass = clampAudioFilterConfig(
+    { type: 'lowpass', cutoffHz: draft.lowpassCutoffHz },
+    sampleRateHz,
+  ) as Extract<AudioFilterConfig, { type: 'lowpass' }>
+  const highpass = clampAudioFilterConfig(
+    { type: 'highpass', cutoffHz: draft.highpassCutoffHz },
+    sampleRateHz,
+  ) as Extract<AudioFilterConfig, { type: 'highpass' }>
+  const bandpass = clampAudioFilterConfig(
+    {
+      type: 'bandpass',
+      lowCutoffHz: draft.bandpassLowCutoffHz,
+      highCutoffHz: draft.bandpassHighCutoffHz,
+    },
+    sampleRateHz,
+  ) as Extract<AudioFilterConfig, { type: 'bandpass' }>
+  const bandstop = clampAudioFilterConfig(
+    {
+      type: 'bandstop',
+      lowCutoffHz: draft.bandstopLowCutoffHz,
+      highCutoffHz: draft.bandstopHighCutoffHz,
+    },
+    sampleRateHz,
+  ) as Extract<AudioFilterConfig, { type: 'bandstop' }>
+  return {
+    ...draft,
+    lowpassCutoffHz: lowpass.cutoffHz,
+    highpassCutoffHz: highpass.cutoffHz,
+    bandpassLowCutoffHz: bandpass.lowCutoffHz,
+    bandpassHighCutoffHz: bandpass.highCutoffHz,
+    bandstopLowCutoffHz: bandstop.lowCutoffHz,
+    bandstopHighCutoffHz: bandstop.highCutoffHz,
+  }
+}
+
+function filterFrequencyToSlider(frequencyHz: number, maximumHz: number): number {
+  if (maximumHz <= 1) {
+    return 0
+  }
+  return Math.round((Math.log(clamp(frequencyHz, 1, maximumHz)) / Math.log(maximumHz)) * FILTER_LOG_SLIDER_MAX)
+}
+
+function filterSliderToFrequency(sliderValue: number, maximumHz: number): number {
+  if (maximumHz <= 1) {
+    return 1
+  }
+  return Math.round(Math.exp((clamp(sliderValue, 0, FILTER_LOG_SLIDER_MAX) / FILTER_LOG_SLIDER_MAX) * Math.log(maximumHz)))
 }
 
 function getWaveformPeakAbs(envelope: WaveformEnvelopeResult | null): number {
@@ -685,6 +764,8 @@ export function bootstrapApp(): void {
 
   let captureChunkUnsubscribe: (() => void) | null = null
   let analysisColumnsUnsubscribe: (() => void) | null = null
+  let liveFilterProgressUnsubscribe: (() => void) | null = null
+  let fileFilterProgressUnsubscribe: (() => void) | null = null
   let frameId: number | null = null
   let lastAnimationTimestamp: number | null = null
   let timelineSyncState: TimelineSyncState = {
@@ -748,6 +829,7 @@ export function bootstrapApp(): void {
   let fftProfileAccumulator = new Float32Array(0)
   let fftPlotCursorHz: number | null = null
   let fftPlotCursorPointerId: number | null = null
+  let fftTimeCursorDragCanvas: HTMLCanvasElement | null = null
   let isColormapPopoverOpen = false
   const colormapOptionButtons = new Map<ColormapId, HTMLButtonElement>()
   const fftCursorState: FftCursorState = {
@@ -778,6 +860,7 @@ export function bootstrapApp(): void {
   let waveformRawPeakAbs = 0
   let waveformCurrentPeakAbs = 0
   let normalizationRequestSequence = 0
+  let audioFilterOperationSequence = 0
 
   const setColormapPopoverOpen = (open: boolean, focusActiveOption = false): void => {
     isColormapPopoverOpen = open
@@ -1128,7 +1211,8 @@ export function bootstrapApp(): void {
   }
 
   const resizeFftCanvas = (): PlotMetrics => {
-    const dprCap = isMobileViewport() ? 1.5 : 2
+    const mobile = isMobileViewport()
+    const dprCap = mobile ? 1.5 : 2
     const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, dprCap))
     const width = Math.max(1, Math.floor(elements.fftCanvas.clientWidth * dpr))
     const height = Math.max(1, Math.floor(elements.fftCanvas.clientHeight * dpr))
@@ -1138,10 +1222,10 @@ export function bootstrapApp(): void {
       elements.fftCanvas.height = height
     }
 
-    const marginLeft = 52
-    const marginRight = 12
-    const marginTop = 10
-    const marginBottom = 30
+    const marginLeft = (mobile ? 66 : 76) * dpr
+    const marginRight = 14 * dpr
+    const marginTop = 12 * dpr
+    const marginBottom = 44 * dpr
     return {
       plotX: marginLeft,
       plotY: marginTop,
@@ -1174,12 +1258,17 @@ export function bootstrapApp(): void {
   }
 
   const renderFftPanel = (state: AppState): void => {
+    if (state.detailView !== 'fft') {
+      return
+    }
     const metrics = resizeFftCanvas()
     const { plotX, plotY, plotWidth, plotHeight, canvasWidth, canvasHeight } = metrics
     const minDb = state.decibelMin
     const maxDb = state.decibelMax
     const { nyquistHz, minHz: freqMinHz, maxHz: freqMaxHz, spanHz: freqSpan } = getFftFrequencyBounds(state)
     const dbSpan = Math.max(MIN_DECIBEL_GAP, maxDb - minDb)
+    const fontSize = (isMobileViewport() ? 14 : 16) * metrics.dpr
+    const fontFamily = '"Times New Roman", Times, serif'
 
     fftCanvasCtx.fillStyle = 'rgb(2 8 18)'
     fftCanvasCtx.fillRect(0, 0, canvasWidth, canvasHeight)
@@ -1200,14 +1289,14 @@ export function bootstrapApp(): void {
     }
 
     fftCanvasCtx.fillStyle = 'rgb(166 189 220)'
-    fftCanvasCtx.font = '11px "Avenir Next", "Yu Gothic", sans-serif'
+    fftCanvasCtx.font = `${fontSize}px ${fontFamily}`
     fftCanvasCtx.textBaseline = 'middle'
     fftCanvasCtx.textAlign = 'right'
     for (let index = 0; index < FFT_PANEL_TICK_COUNT; index += 1) {
       const ratio = index / Math.max(FFT_PANEL_TICK_COUNT - 1, 1)
       const valueDb = maxDb - ratio * dbSpan
       const y = Math.round(plotY + ratio * plotHeight)
-      fftCanvasCtx.fillText(String(Math.round(valueDb)), plotX - 6, y)
+      fftCanvasCtx.fillText(String(Math.round(valueDb)), plotX - 7 * metrics.dpr, y)
     }
 
     fftCanvasCtx.textBaseline = 'top'
@@ -1222,14 +1311,18 @@ export function bootstrapApp(): void {
       } else {
         fftCanvasCtx.textAlign = 'center'
       }
-      fftCanvasCtx.fillText(fftNumberFormatter.format(valueHz), x, plotY + plotHeight + 6)
+      fftCanvasCtx.fillText(
+        fftNumberFormatter.format(valueHz),
+        x,
+        plotY + plotHeight + 7 * metrics.dpr,
+      )
     }
 
     fftCanvasCtx.textAlign = 'right'
     fftCanvasCtx.textBaseline = 'alphabetic'
-    fftCanvasCtx.fillText('Frequency [Hz]', plotX + plotWidth, canvasHeight - 4)
+    fftCanvasCtx.fillText('Frequency [Hz]', plotX + plotWidth, canvasHeight - 5 * metrics.dpr)
     fftCanvasCtx.save()
-    fftCanvasCtx.translate(14, plotY + plotHeight / 2)
+    fftCanvasCtx.translate(19 * metrics.dpr, plotY + plotHeight / 2)
     fftCanvasCtx.rotate(-Math.PI / 2)
     fftCanvasCtx.textAlign = 'center'
     fftCanvasCtx.fillText('Level [dB]', 0, 0)
@@ -1323,34 +1416,49 @@ export function bootstrapApp(): void {
     fftCanvasCtx.arc(displayCursorX, displayCursorY, 2.6, 0, Math.PI * 2)
     fftCanvasCtx.fill()
 
-    fftCanvasCtx.font = '11px "Avenir Next", "Yu Gothic", sans-serif'
+    fftCanvasCtx.font = `${(isMobileViewport() ? 13 : 15) * metrics.dpr}px ${fontFamily}`
     fftCanvasCtx.textAlign = 'right'
     fftCanvasCtx.textBaseline = 'top'
     const textWidth = fftCanvasCtx.measureText(labelText).width
-    const labelPaddingX = 6
-    const labelPaddingY = 4
-    const labelHeight = 16
-    const labelRight = plotX + plotWidth - 6
-    const labelTop = plotY + 6
+    const labelPaddingX = 7 * metrics.dpr
+    const labelPaddingY = 5 * metrics.dpr
+    const labelHeight = 21 * metrics.dpr
+    const labelRight = plotX + plotWidth - 7 * metrics.dpr
+    const labelTop = plotY + 7 * metrics.dpr
     fftCanvasCtx.fillStyle = 'rgba(6, 17, 31, 0.78)'
     fftCanvasCtx.fillRect(
       labelRight - textWidth - labelPaddingX * 2,
-      labelTop - 1,
+      labelTop - metrics.dpr,
       textWidth + labelPaddingX * 2,
       labelHeight,
     )
     fftCanvasCtx.fillStyle = 'rgb(244 248 255)'
-    fftCanvasCtx.fillText(labelText, labelRight - labelPaddingX, labelTop + labelPaddingY - 1)
+    fftCanvasCtx.fillText(
+      labelText,
+      labelRight - labelPaddingX,
+      labelTop + labelPaddingY - metrics.dpr,
+    )
   }
 
-  const updateCursorOverlay = (state: AppState): void => {
-    const overlayConfig: CursorOverlayConfig = {
+  const getFftCursorOverlayConfig = (): CursorOverlayConfig => ({
       mode: fftCursorState.mode,
       singleSec: fftCursorState.singleSec,
       rangeMinSec: fftCursorState.rangeMinSec,
       rangeMaxSec: fftCursorState.rangeMaxSec,
-    }
+  })
+
+  const updateCursorOverlay = (state: AppState): void => {
+    const overlayConfig = getFftCursorOverlayConfig()
     renderer.setCursorOverlay(overlayConfig)
+    if (state.detailView === 'waveform') {
+      waveformRenderer.render(waveformEnvelope, {
+        timeMinSec: state.timeMinSec,
+        timeMaxSec: state.timeMaxSec,
+        xTicksSec: buildTimeTicks(state.timeMinSec, state.timeMaxSec),
+        isAmplitudeNormalizationApplied: state.isAmplitudeNormalizationApplied,
+        cursorOverlay: overlayConfig,
+      })
+    }
 
     if (fftCursorState.mode === 'single') {
       elements.fftStatusLabel.textContent = `single @ ${fftCursorState.singleSec.toFixed(3)} s`
@@ -1370,6 +1478,10 @@ export function bootstrapApp(): void {
 
   const refreshFftProfile = (allowFallbackNotice: boolean): void => {
     const state = stateStore.getState()
+    if (state.detailView !== 'fft') {
+      updateCursorOverlay(state)
+      return
+    }
     fftProfileState = computeFftProfile(state, allowFallbackNotice)
     fftLastRefreshAtMs = performance.now()
     elements.fftAverageToggleButton.classList.toggle('is-active', fftCursorState.mode === 'average')
@@ -1409,6 +1521,7 @@ export function bootstrapApp(): void {
     timeMaxSec: state.timeMaxSec,
     xTicksSec: buildTimeTicks(state.timeMinSec, state.timeMaxSec),
     isAmplitudeNormalizationApplied: state.isAmplitudeNormalizationApplied,
+    cursorOverlay: getFftCursorOverlayConfig(),
   })
 
   const updateAmplitudeNormalizationUi = (state: AppState): void => {
@@ -1419,6 +1532,7 @@ export function bootstrapApp(): void {
       state.isSavingAudio ||
       state.isLoadingFile ||
       state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter ||
       !hasNormalizableRange
     elements.normalizeAmplitudeButton.classList.toggle('is-applied', state.isAmplitudeNormalizationApplied)
     elements.normalizeAmplitudeButton.setAttribute(
@@ -1432,9 +1546,9 @@ export function bootstrapApp(): void {
           : 'Normalize amplitude using visible range',
     )
 
+    elements.waveformNormalizationStatus.hidden = false
     if (!state.isAmplitudeNormalizationApplied) {
-      elements.waveformNormalizationStatus.hidden = true
-      elements.waveformNormalizationStatus.textContent = ''
+      elements.waveformNormalizationStatus.textContent = 'Gain ×1'
       elements.waveformNormalizationStatus.title = ''
       elements.waveformNormalizationStatus.classList.remove('is-warning')
       return
@@ -1464,6 +1578,16 @@ export function bootstrapApp(): void {
     }
   }
 
+  const getAudioFilterResetPatch = (): Partial<AppState> => {
+    audioFilterOperationSequence += 1
+    return {
+      audioFilterChain: [],
+      audioFilterUndoDepth: 0,
+      isApplyingAudioFilter: false,
+      audioFilterProgressPercent: null,
+    }
+  }
+
   const clearWaveformPanel = (state: AppState = stateStore.getState()): void => {
     waveformGeneration += 1
     waveformEnvelope = null
@@ -1488,8 +1612,9 @@ export function bootstrapApp(): void {
     waveformRefreshPending = false
     const requestGeneration = waveformGeneration
     const requestState = stateStore.getState()
-    const metrics = waveformRenderer.resizeForContainer()
-    const columnCount = Math.max(1, metrics.plotWidth)
+    const waveformVisible = requestState.detailView === 'waveform'
+    const metrics = waveformVisible ? waveformRenderer.resizeForContainer() : null
+    const columnCount = Math.max(1, metrics?.plotWidth ?? 1)
     const request = {
       timeMinSec: requestState.timeMinSec,
       timeMaxSec: requestState.timeMaxSec,
@@ -1502,19 +1627,21 @@ export function bootstrapApp(): void {
           ? await fileAnalysisService.requestWaveformEnvelope(request)
           : await analysisService.requestWaveformEnvelope(request)
       const latestState = stateStore.getState()
-      const latestMetrics = waveformRenderer.resizeForContainer()
+      const latestMetrics = latestState.detailView === 'waveform' ? waveformRenderer.resizeForContainer() : null
       const isCurrent =
         requestGeneration === waveformGeneration &&
         latestState.analysisSource === requestState.analysisSource &&
         latestState.timeMinSec === requestState.timeMinSec &&
         latestState.timeMaxSec === requestState.timeMaxSec &&
-        latestMetrics.plotWidth === columnCount
+        (latestState.detailView !== 'waveform' || latestMetrics?.plotWidth === columnCount)
       if (isCurrent) {
         const normalizedEnvelope = applyGainToWaveformEnvelope(result, latestState.amplitudeNormalizationGain)
         waveformEnvelope = normalizedEnvelope
         waveformRawPeakAbs = getWaveformPeakAbs(result)
         waveformCurrentPeakAbs = getWaveformPeakAbs(normalizedEnvelope)
-        waveformRenderer.render(normalizedEnvelope, getWaveformRenderConfig(latestState))
+        if (latestState.detailView === 'waveform') {
+          waveformRenderer.render(normalizedEnvelope, getWaveformRenderConfig(latestState))
+        }
         updateAmplitudeNormalizationUi(latestState)
       }
     } catch {
@@ -1522,7 +1649,9 @@ export function bootstrapApp(): void {
         waveformEnvelope = null
         waveformRawPeakAbs = 0
         waveformCurrentPeakAbs = 0
-        waveformRenderer.clear(getWaveformRenderConfig(stateStore.getState()))
+        if (stateStore.getState().detailView === 'waveform') {
+          waveformRenderer.clear(getWaveformRenderConfig(stateStore.getState()))
+        }
         updateAmplitudeNormalizationUi(stateStore.getState())
       }
     } finally {
@@ -1590,6 +1719,7 @@ export function bootstrapApp(): void {
       requestState.isSavingAudio ||
       requestState.isLoadingFile ||
       requestState.isNormalizingAmplitude ||
+      requestState.isApplyingAudioFilter ||
       waveformRawPeakAbs <= NORMALIZATION_MIN_PEAK
     ) {
       return
@@ -1638,10 +1768,12 @@ export function bootstrapApp(): void {
       const previousGain = latestState.amplitudeNormalizationGain
       if (waveformEnvelope) {
         waveformEnvelope = applyGainToWaveformEnvelope(waveformEnvelope, nextGain / previousGain)
-        waveformRenderer.render(waveformEnvelope, {
-          ...getWaveformRenderConfig(latestState),
-          isAmplitudeNormalizationApplied: true,
-        })
+        if (latestState.detailView === 'waveform') {
+          waveformRenderer.render(waveformEnvelope, {
+            ...getWaveformRenderConfig(latestState),
+            isAmplitudeNormalizationApplied: true,
+          })
+        }
       }
       waveformCurrentPeakAbs = waveformRawPeakAbs * nextGain
       stateStore.setState({
@@ -2190,6 +2322,247 @@ export function bootstrapApp(): void {
 
     if (document.activeElement !== elements.overlapInput) {
       elements.overlapInput.value = String(state.analysisOverlapPercent)
+    }
+  }
+
+  const renderDetailWorkspace = (state: AppState): void => {
+    const waveformSelected = state.detailView === 'waveform'
+    elements.detailWaveformTab.setAttribute('aria-selected', String(waveformSelected))
+    elements.detailWaveformTab.tabIndex = waveformSelected ? 0 : -1
+    elements.detailFftTab.setAttribute('aria-selected', String(!waveformSelected))
+    elements.detailFftTab.tabIndex = waveformSelected ? -1 : 0
+    elements.detailWaveformPanel.hidden = !waveformSelected
+    elements.detailFftPanel.hidden = waveformSelected
+  }
+
+  const getDraftCutoffValues = (draft: AudioFilterDraft): readonly [number, number | null] => {
+    switch (draft.type) {
+      case 'lowpass':
+        return [draft.lowpassCutoffHz, null]
+      case 'highpass':
+        return [draft.highpassCutoffHz, null]
+      case 'bandpass':
+        return [draft.bandpassLowCutoffHz, draft.bandpassHighCutoffHz]
+      case 'bandstop':
+        return [draft.bandstopLowCutoffHz, draft.bandstopHighCutoffHz]
+    }
+  }
+
+  const renderSignalProcessingControls = (state: AppState, hasAudio: boolean): void => {
+    const sampleRateHz = Math.max(2, state.currentSampleRateHz ?? analysisService.getSampleRateHz())
+    const maximumHz = getMaximumFilterFrequencyHz(sampleRateHz)
+    const draftConfig = getAudioFilterConfigFromDraft(state.audioFilterDraft)
+    const validationError = validateAudioFilterConfig(draftConfig, sampleRateHz)
+    const filterTypeButtons: Array<readonly [AudioFilterType, HTMLButtonElement]> = [
+      ['lowpass', elements.filterTypeLowpassButton],
+      ['highpass', elements.filterTypeHighpassButton],
+      ['bandpass', elements.filterTypeBandpassButton],
+      ['bandstop', elements.filterTypeBandstopButton],
+    ]
+    const isParameterBusy = state.isApplyingAudioFilter || state.isLoadingFile
+    for (const [type, button] of filterTypeButtons) {
+      const selected = state.audioFilterDraft.type === type
+      button.classList.toggle('is-active', selected)
+      button.setAttribute('aria-pressed', String(selected))
+      button.disabled = isParameterBusy
+    }
+
+    const [firstCutoffHz, secondCutoffHz] = getDraftCutoffValues(state.audioFilterDraft)
+    const isBand = secondCutoffHz !== null
+    elements.filterSingleCutoffFields.hidden = isBand
+    elements.filterBandCutoffFields.hidden = !isBand
+    const inputs = [
+      elements.filterCutoffInput,
+      elements.filterCutoffSlider,
+      elements.filterLowCutoffInput,
+      elements.filterLowCutoffSlider,
+      elements.filterHighCutoffInput,
+      elements.filterHighCutoffSlider,
+    ]
+    for (const input of inputs) {
+      input.disabled = isParameterBusy
+    }
+    for (const input of [elements.filterCutoffInput, elements.filterLowCutoffInput, elements.filterHighCutoffInput]) {
+      input.min = '1'
+      input.max = String(maximumHz)
+    }
+    if (!isBand) {
+      if (document.activeElement !== elements.filterCutoffInput) {
+        elements.filterCutoffInput.value = String(Math.round(firstCutoffHz))
+      }
+      elements.filterCutoffSlider.value = String(filterFrequencyToSlider(firstCutoffHz, maximumHz))
+    } else {
+      if (document.activeElement !== elements.filterLowCutoffInput) {
+        elements.filterLowCutoffInput.value = String(Math.round(firstCutoffHz))
+      }
+      if (document.activeElement !== elements.filterHighCutoffInput) {
+        elements.filterHighCutoffInput.value = String(Math.round(secondCutoffHz))
+      }
+      elements.filterLowCutoffSlider.value = String(filterFrequencyToSlider(firstCutoffHz, maximumHz))
+      elements.filterHighCutoffSlider.value = String(filterFrequencyToSlider(secondCutoffHz, maximumHz))
+    }
+
+    const operationBusy =
+      state.isRecording ||
+      state.isPlayingBack ||
+      state.isSavingAudio ||
+      state.isLoadingFile ||
+      state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter
+    elements.filterApplyButton.disabled =
+      operationBusy || !hasAudio || Boolean(validationError)
+    elements.filterRemoveButton.disabled =
+      operationBusy ||
+      !hasAudio ||
+      state.audioFilterUndoDepth === 0 ||
+      state.audioFilterChain.length <= 0
+    elements.filterProgressTrack.hidden = !state.isApplyingAudioFilter
+    const progress = clamp(state.audioFilterProgressPercent ?? 0, 0, 100)
+    elements.filterProgressTrack.setAttribute('aria-valuenow', String(Math.round(progress)))
+    elements.filterProgressFill.style.width = `${progress}%`
+
+  }
+
+  const setDetailView = (detailView: DetailView, focusTab = false): void => {
+    const currentState = stateStore.getState()
+    if (currentState.detailView !== detailView) {
+      stateStore.setState({ detailView })
+    }
+    requestAnimationFrame(() => {
+      if (detailView === 'waveform') {
+        waveformGeneration += 1
+        scheduleWaveformRefresh(true)
+        if (focusTab) elements.detailWaveformTab.focus()
+      } else {
+        scheduleFftProfileRefresh(true, false)
+        if (focusTab) elements.detailFftTab.focus()
+      }
+    })
+  }
+
+  const setFilterDraftType = (type: AudioFilterType): void => {
+    const state = stateStore.getState()
+    if (state.isApplyingAudioFilter || state.audioFilterDraft.type === type) {
+      return
+    }
+    stateStore.setState({ audioFilterDraft: { ...state.audioFilterDraft, type } })
+  }
+
+  const setActiveDraftCutoff = (position: 'first' | 'second', frequencyHz: number): void => {
+    const state = stateStore.getState()
+    const maximumHz = getMaximumFilterFrequencyHz(state.currentSampleRateHz ?? analysisService.getSampleRateHz())
+    const value = clamp(Math.round(frequencyHz), 1, maximumHz)
+    const nextDraft = { ...state.audioFilterDraft }
+    switch (nextDraft.type) {
+      case 'lowpass':
+        nextDraft.lowpassCutoffHz = value
+        break
+      case 'highpass':
+        nextDraft.highpassCutoffHz = value
+        break
+      case 'bandpass':
+        if (position === 'first') nextDraft.bandpassLowCutoffHz = value
+        else nextDraft.bandpassHighCutoffHz = value
+        break
+      case 'bandstop':
+        if (position === 'first') nextDraft.bandstopLowCutoffHz = value
+        else nextDraft.bandstopHighCutoffHz = value
+        break
+    }
+    stateStore.setState({ audioFilterDraft: nextDraft })
+  }
+
+  const runAudioFilterChange = async (
+    filterChain: AudioFilterConfig[],
+    audioFilterUndoDepth: 0 | 1,
+  ): Promise<void> => {
+    const initialState = stateStore.getState()
+    const hasAudio = hasSavableAudioData()
+    const isBusy =
+      initialState.isRecording ||
+      initialState.isPlayingBack ||
+      initialState.isSavingAudio ||
+      initialState.isLoadingFile ||
+      initialState.isNormalizingAmplitude ||
+      initialState.isApplyingAudioFilter
+    if (!hasAudio || isBusy) {
+      return
+    }
+    for (const config of filterChain) {
+      const validationError = validateAudioFilterConfig(
+        config,
+        initialState.currentSampleRateHz ?? analysisService.getSampleRateHz(),
+      )
+      if (validationError) {
+        stateStore.setState({ errorMessage: validationError })
+        return
+      }
+    }
+
+    audioFilterOperationSequence += 1
+    const operationSequence = audioFilterOperationSequence
+    const source = initialState.analysisSource
+    stateStore.setState({
+      isApplyingAudioFilter: true,
+      audioFilterProgressPercent: 0,
+      errorMessage: null,
+    })
+
+    try {
+      let liveSnapshot: AnalysisSnapshot | null = null
+      if (source === 'file') {
+        await fileAnalysisService.setAudioFilters(filterChain, operationSequence)
+      } else {
+        liveSnapshot = await analysisService.setAudioFilters(filterChain, operationSequence)
+      }
+      const afterWorkerState = stateStore.getState()
+      if (
+        operationSequence !== audioFilterOperationSequence ||
+        afterWorkerState.analysisSource !== source ||
+        !afterWorkerState.isApplyingAudioFilter
+      ) {
+        return
+      }
+      if (liveSnapshot) {
+        applySnapshot(liveSnapshot)
+      }
+
+      const globalPeakAbs = await requestWaveformPeak(
+        source,
+        afterWorkerState.timeDomainMinSec,
+        afterWorkerState.timeDomainMaxSec,
+      )
+      const finalState = stateStore.getState()
+      if (operationSequence !== audioFilterOperationSequence || finalState.analysisSource !== source) {
+        return
+      }
+      stateStore.setState({
+        audioFilterChain: filterChain,
+        audioFilterUndoDepth,
+        isApplyingAudioFilter: false,
+        audioFilterProgressPercent: null,
+        normalizedGlobalPeakAbs: finalState.isAmplitudeNormalizationApplied
+          ? globalPeakAbs * finalState.amplitudeNormalizationGain
+          : null,
+      })
+      waveformGeneration += 1
+      scheduleWaveformRefresh(true)
+      if (source === 'file') {
+        fileRenderSequence += 1
+        requestFileWindowRender(true)
+      } else {
+        requestHistoryRender()
+      }
+      scheduleFftProfileRefresh(true, false)
+    } catch (error) {
+      if (operationSequence !== audioFilterOperationSequence) {
+        return
+      }
+      stateStore.setState({
+        isApplyingAudioFilter: false,
+        audioFilterProgressPercent: null,
+        errorMessage: toErrorMessage(error, 'フィルタ処理に失敗しました。'),
+      })
     }
   }
 
@@ -2791,6 +3164,15 @@ export function bootstrapApp(): void {
       frameId = requestAnimationFrame(drawFrame)
     }
   })
+  const handleFilterProgress = (progress: { generation: number; percent: number }): void => {
+    const state = stateStore.getState()
+    if (!state.isApplyingAudioFilter || progress.generation !== audioFilterOperationSequence) {
+      return
+    }
+    stateStore.setState({ audioFilterProgressPercent: clamp(progress.percent, 0, 100) })
+  }
+  liveFilterProgressUnsubscribe = analysisService.subscribeAudioFilterProgress(handleFilterProgress)
+  fileFilterProgressUnsubscribe = fileAnalysisService.subscribeAudioFilterProgress(handleFilterProgress)
   const initialState = stateStore.getState()
   analysisService.start({
     frameSize: initialState.analysisFrameSize,
@@ -2902,7 +3284,8 @@ export function bootstrapApp(): void {
       state.isPlayingBack ||
       state.isSavingAudio ||
       state.isLoadingFile ||
-      state.isNormalizingAmplitude
+      state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter
     ) {
       return
     }
@@ -2964,7 +3347,8 @@ export function bootstrapApp(): void {
       state.isPlayingBack ||
       state.isSavingAudio ||
       state.isLoadingFile ||
-      state.isNormalizingAmplitude
+      state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter
     ) {
       return
     }
@@ -3037,7 +3421,9 @@ export function bootstrapApp(): void {
       timeDomainMaxSec: TIME_DOMAIN_MAX_SEC,
       timeMinSec: TIME_DOMAIN_MIN_SEC,
       timeMaxSec: TIME_DOMAIN_MAX_SEC,
+      audioFilterDraft: clampAudioFilterDraft(stateStore.getState().audioFilterDraft, liveSampleRate),
       ...getAmplitudeNormalizationResetPatch(),
+      ...getAudioFilterResetPatch(),
     })
     syncTimelineState()
   }
@@ -3151,6 +3537,7 @@ export function bootstrapApp(): void {
       timeMaxSec: TIME_DOMAIN_MAX_SEC,
       errorMessage: null,
       ...getAmplitudeNormalizationResetPatch(),
+      ...getAudioFilterResetPatch(),
     })
     syncTimelineState()
     scheduleFftProfileRefresh(true, false)
@@ -3163,7 +3550,8 @@ export function bootstrapApp(): void {
       currentState.isPlayingBack ||
       currentState.isSavingAudio ||
       currentState.isLoadingFile ||
-      currentState.isNormalizingAmplitude
+      currentState.isNormalizingAmplitude ||
+      currentState.isApplyingAudioFilter
     ) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
@@ -3213,6 +3601,7 @@ export function bootstrapApp(): void {
       audioReady: false,
       errorMessage: null,
       ...getAmplitudeNormalizationResetPatch(),
+      ...getAudioFilterResetPatch(),
     })
 
     try {
@@ -3227,7 +3616,7 @@ export function bootstrapApp(): void {
       const loaded = await fileAnalysisService.loadFile(decoded.samples, decoded.sampleRateHz)
       const roundedDurationSec = Math.max(
         MIN_TIME_GAP_SEC,
-        Math.round(loaded.durationSec / TIME_STEP_SEC) * TIME_STEP_SEC,
+        Math.ceil(loaded.durationSec / TIME_STEP_SEC) * TIME_STEP_SEC,
       )
       const domainMaxSec = Math.max(TIME_DOMAIN_MIN_SEC + MIN_TIME_GAP_SEC, roundedDurationSec)
 
@@ -3236,6 +3625,7 @@ export function bootstrapApp(): void {
         loadedAudioName: decoded.fileName,
         loadedAudioDurationSec: loaded.durationSec,
         currentSampleRateHz: loaded.sampleRateHz,
+        audioFilterDraft: clampAudioFilterDraft(stateStore.getState().audioFilterDraft, loaded.sampleRateHz),
         timeDomainMinSec: TIME_DOMAIN_MIN_SEC,
         timeDomainMaxSec: domainMaxSec,
         timeMinSec: TIME_DOMAIN_MIN_SEC,
@@ -3408,6 +3798,8 @@ export function bootstrapApp(): void {
     const hasSavableAudio = hasSavableAudioData()
     renderControlsView(elements, state, hasSavableAudio)
     renderPlaybackWidget(state, hasSavableAudio)
+    renderDetailWorkspace(state)
+    renderSignalProcessingControls(state, hasSavableAudio)
     updateAmplitudeNormalizationUi(state)
     elements.analysisMetrics.textContent = formatAnalysisMetricsText(
       Math.max(1, state.currentSampleRateHz ?? timelineSyncState.sampleRateHz),
@@ -3978,9 +4370,16 @@ export function bootstrapApp(): void {
     }
   }
 
-  const beginFftCursorDrag = (event: PointerEvent): void => {
+  const beginFftCursorDrag = (
+    event: PointerEvent,
+    targetCanvas: HTMLCanvasElement,
+    metrics: PlotMetrics,
+  ): void => {
     const state = stateStore.getState()
     if (state.isLoadingFile) {
+      return
+    }
+    if (state.isApplyingAudioFilter) {
       return
     }
     const cursorBounds = getSpectrogramCursorBoundsSec(state)
@@ -3989,12 +4388,11 @@ export function bootstrapApp(): void {
       return
     }
 
-    const metrics = renderer.getPlotMetrics()
     if (metrics.plotWidth <= 0 || metrics.plotHeight <= 0) {
       return
     }
 
-    const rect = elements.canvas.getBoundingClientRect()
+    const rect = targetCanvas.getBoundingClientRect()
     const pointerX = resolveCanvasPointerX(event.clientX, rect, metrics.dpr)
     const tapSeconds = getTapSecondFromPointer(state, metrics, pointerX)
     const targetHandle = resolveFftTapTargetHandle(state, metrics, pointerX, tapSeconds)
@@ -4004,7 +4402,8 @@ export function bootstrapApp(): void {
 
     fftCursorState.activeDragHandle = targetHandle
     fftCursorState.activePointerId = event.pointerId
-    elements.canvas.setPointerCapture(event.pointerId)
+    fftTimeCursorDragCanvas = targetCanvas
+    targetCanvas.setPointerCapture(event.pointerId)
     moveFftCursorToSec(targetHandle, tapSeconds)
     scheduleFftProfileRefresh(false, false)
     updateCursorOverlay(state)
@@ -4018,8 +4417,15 @@ export function bootstrapApp(): void {
     }
 
     const state = stateStore.getState()
-    const metrics = renderer.getPlotMetrics()
-    const rect = elements.canvas.getBoundingClientRect()
+    const targetCanvas = fftTimeCursorDragCanvas
+    if (!targetCanvas) {
+      return
+    }
+    const metrics =
+      targetCanvas === elements.waveformCanvas
+        ? waveformRenderer.getPlotMetrics()
+        : renderer.getPlotMetrics()
+    const rect = targetCanvas.getBoundingClientRect()
     if (metrics.plotWidth <= 0 || rect.width <= 0) {
       return
     }
@@ -4039,8 +4445,10 @@ export function bootstrapApp(): void {
 
     fftCursorState.activeDragHandle = null
     fftCursorState.activePointerId = null
-    if (elements.canvas.hasPointerCapture(event.pointerId)) {
-      elements.canvas.releasePointerCapture(event.pointerId)
+    const targetCanvas = fftTimeCursorDragCanvas
+    fftTimeCursorDragCanvas = null
+    if (targetCanvas?.hasPointerCapture(event.pointerId)) {
+      targetCanvas.releasePointerCapture(event.pointerId)
     }
     scheduleFftProfileRefresh(true, true)
   }
@@ -4107,12 +4515,78 @@ export function bootstrapApp(): void {
     }
   }
 
+  elements.detailWaveformTab.addEventListener('click', () => setDetailView('waveform'))
+  elements.detailFftTab.addEventListener('click', () => setDetailView('fft'))
+  const handleDetailTabKeydown = (event: KeyboardEvent): void => {
+    const currentView = stateStore.getState().detailView
+    let nextView: DetailView | null = null
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      nextView = currentView === 'waveform' ? 'fft' : 'waveform'
+    } else if (event.key === 'Home') {
+      nextView = 'waveform'
+    } else if (event.key === 'End') {
+      nextView = 'fft'
+    }
+    if (!nextView) {
+      return
+    }
+    event.preventDefault()
+    setDetailView(nextView, true)
+  }
+  elements.detailWaveformTab.addEventListener('keydown', handleDetailTabKeydown)
+  elements.detailFftTab.addEventListener('keydown', handleDetailTabKeydown)
+
+  const filterTypeButtons: Array<readonly [AudioFilterType, HTMLButtonElement]> = [
+    ['lowpass', elements.filterTypeLowpassButton],
+    ['highpass', elements.filterTypeHighpassButton],
+    ['bandpass', elements.filterTypeBandpassButton],
+    ['bandstop', elements.filterTypeBandstopButton],
+  ]
+  for (const [type, button] of filterTypeButtons) {
+    button.addEventListener('click', () => setFilterDraftType(type))
+  }
+
+  const commitFilterNumberInput = (input: HTMLInputElement, position: 'first' | 'second'): void => {
+    const parsed = Number(input.value)
+    if (!Number.isFinite(parsed)) {
+      renderSignalProcessingControls(stateStore.getState(), hasSavableAudioData())
+      return
+    }
+    setActiveDraftCutoff(position, parsed)
+  }
+  elements.filterCutoffInput.addEventListener('change', () => commitFilterNumberInput(elements.filterCutoffInput, 'first'))
+  elements.filterLowCutoffInput.addEventListener('change', () => commitFilterNumberInput(elements.filterLowCutoffInput, 'first'))
+  elements.filterHighCutoffInput.addEventListener('change', () => commitFilterNumberInput(elements.filterHighCutoffInput, 'second'))
+
+  const applyFilterSlider = (slider: HTMLInputElement, position: 'first' | 'second'): void => {
+    const state = stateStore.getState()
+    const maximumHz = getMaximumFilterFrequencyHz(state.currentSampleRateHz ?? analysisService.getSampleRateHz())
+    setActiveDraftCutoff(position, filterSliderToFrequency(Number(slider.value), maximumHz))
+  }
+  elements.filterCutoffSlider.addEventListener('input', () => applyFilterSlider(elements.filterCutoffSlider, 'first'))
+  elements.filterLowCutoffSlider.addEventListener('input', () => applyFilterSlider(elements.filterLowCutoffSlider, 'first'))
+  elements.filterHighCutoffSlider.addEventListener('input', () => applyFilterSlider(elements.filterHighCutoffSlider, 'second'))
+  elements.filterApplyButton.addEventListener('click', () => {
+    const state = stateStore.getState()
+    void runAudioFilterChange(
+      [...state.audioFilterChain, getAudioFilterConfigFromDraft(state.audioFilterDraft)],
+      1,
+    )
+  })
+  elements.filterRemoveButton.addEventListener('click', () => {
+    const state = stateStore.getState()
+    if (state.audioFilterUndoDepth === 0 || state.audioFilterChain.length <= 0) {
+      return
+    }
+    void runAudioFilterChange(state.audioFilterChain.slice(0, -1), 0)
+  })
+
   elements.fftAverageToggleButton.addEventListener('click', () => {
     toggleAverageFftMode(fftCursorState.mode !== 'average')
   })
 
   elements.canvas.addEventListener('pointerdown', (event) => {
-    beginFftCursorDrag(event)
+    beginFftCursorDrag(event, elements.canvas, renderer.getPlotMetrics())
   })
   elements.canvas.addEventListener('pointermove', (event) => {
     if (fftCursorState.activePointerId !== event.pointerId) {
@@ -4123,6 +4597,18 @@ export function bootstrapApp(): void {
   })
   elements.canvas.addEventListener('pointerup', endFftCursorDrag)
   elements.canvas.addEventListener('pointercancel', endFftCursorDrag)
+  elements.waveformCanvas.addEventListener('pointerdown', (event) => {
+    beginFftCursorDrag(event, elements.waveformCanvas, waveformRenderer.getPlotMetrics())
+  })
+  elements.waveformCanvas.addEventListener('pointermove', (event) => {
+    if (fftCursorState.activePointerId !== event.pointerId) {
+      return
+    }
+    event.preventDefault()
+    applyFftCursorDrag(event)
+  })
+  elements.waveformCanvas.addEventListener('pointerup', endFftCursorDrag)
+  elements.waveformCanvas.addEventListener('pointercancel', endFftCursorDrag)
   elements.fftCanvas.addEventListener('pointerdown', (event) => {
     beginFftPlotCursorDrag(event)
   })
@@ -4143,7 +4629,8 @@ export function bootstrapApp(): void {
       state.isPlayingBack ||
       state.isSavingAudio ||
       state.isLoadingFile ||
-      state.isNormalizingAmplitude
+      state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter
     ) {
       stateStore.setState({ errorMessage: '停止中に音声ファイルを読み込んでください。' })
       return
@@ -4184,9 +4671,14 @@ export function bootstrapApp(): void {
       stateStore.setState({ errorMessage: '音声ファイルの読み込み完了後にRecordしてください。' })
       return
     }
+    if (state.isApplyingAudioFilter) {
+      stateStore.setState({ errorMessage: 'フィルタ処理完了後にRecordしてください。' })
+      return
+    }
 
     stateStore.setState({
       ...getAmplitudeNormalizationResetPatch(),
+      ...getAudioFilterResetPatch(),
       errorMessage: null,
     })
     requestHistoryRender()
@@ -4199,13 +4691,16 @@ export function bootstrapApp(): void {
       await stopPlayback()
       if (state.analysisSource === 'file') {
         resetToLiveModeState()
-        latestPcmWindow48k = new Float32Array(0)
-        latestCapturedSamples48k = 0
-        timelineSyncState.capturedSamples = 0
-        resetFrequencyHistory()
-        resetAnalysisBuffers()
-        renderer.clear()
       }
+      audioEngine.clearCapturedData()
+      analysisService.clear()
+      latestPcmWindow48k = new Float32Array(0)
+      latestCapturedSamples48k = 0
+      timelineSyncState.capturedSamples = 0
+      resetFrequencyHistory()
+      resetAnalysisBuffers()
+      renderer.clear()
+      clearWaveformPanel()
       const liveState = stateStore.getState()
       const currentPlotWidth = Math.max(1, getHistoryCapacity())
       analysisService.start({
@@ -4274,7 +4769,8 @@ export function bootstrapApp(): void {
       state.isPlayingBack ||
       state.isRecording ||
       state.isLoadingFile ||
-      state.isNormalizingAmplitude
+      state.isNormalizingAmplitude ||
+      state.isApplyingAudioFilter
     ) {
       stateStore.setState({ errorMessage: '停止中にClearを実行してください。' })
       return
@@ -4297,7 +4793,7 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (state.isSavingAudio || state.isLoadingFile) {
+    if (state.isSavingAudio || state.isLoadingFile || state.isApplyingAudioFilter) {
       stateStore.setState({ errorMessage: '保存処理中です。完了後に再生できます。' })
       return
     }
@@ -4320,7 +4816,7 @@ export function bootstrapApp(): void {
     stateStore.setState({ errorMessage: null })
 
     const state = stateStore.getState()
-    if (state.isRecording || state.isPlayingBack || state.isLoadingFile) {
+    if (state.isRecording || state.isPlayingBack || state.isLoadingFile || state.isApplyingAudioFilter) {
       stateStore.setState({ errorMessage: '停止後に表示範囲を保存できます。' })
       return
     }
@@ -4347,6 +4843,14 @@ export function bootstrapApp(): void {
     if (analysisColumnsUnsubscribe) {
       analysisColumnsUnsubscribe()
       analysisColumnsUnsubscribe = null
+    }
+    if (liveFilterProgressUnsubscribe) {
+      liveFilterProgressUnsubscribe()
+      liveFilterProgressUnsubscribe = null
+    }
+    if (fileFilterProgressUnsubscribe) {
+      fileFilterProgressUnsubscribe()
+      fileFilterProgressUnsubscribe = null
     }
     if (captureChunkUnsubscribe) {
       captureChunkUnsubscribe()
